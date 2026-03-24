@@ -14,3 +14,4 @@ I'd like you to fully autonomously reverse engineer this binary executable file.
 * If you encounter any custom data structures, try to reverse engineer them and add them to `working_notes.md`.
 * Before each task, ask yourself whether the task can be done by running code rather than by your analysis. Prioritize writing global scripts that can be used to e.g. decrypt binary blobs or find function starts that angr fails to identify. Do NOT do any analysis manually that you can automate.
 * Use `angr` for reverse engineering tasks. If you cannot get good results, or do not have high confidence in them, use `r2` for a second opinion.
+* Read `CODEBASE.md` for an outline of the codebase. Read `SCHEMA.md` to understand the database.
