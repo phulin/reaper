@@ -15,7 +15,7 @@ with pyghidra.transaction(program, "Rename parameter"):
 with pyghidra.transaction(program, "Commit params"):
     HighFunctionDBUtil.commitParamsToDatabase(
         hf,
-        True,                                        # useDataTypes
+        True,  # useDataTypes
         HighFunctionDBUtil.ReturnCommitOption.NO_COMMIT,
-        SourceType.USER_DEFINED
+        SourceType.USER_DEFINED,
     )

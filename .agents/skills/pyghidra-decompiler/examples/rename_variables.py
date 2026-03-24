@@ -8,9 +8,9 @@ with pyghidra.transaction(program, "Rename local variable"):
         if sym.getName() == "local_10":
             HighFunctionDBUtil.updateDBVariable(
                 sym,
-                "my_new_name",   # new name, or None to keep current
-                None,            # new DataType, or None to keep current
-                SourceType.USER_DEFINED
+                "my_new_name",  # new name, or None to keep current
+                None,  # new DataType, or None to keep current
+                SourceType.USER_DEFINED,
             )
             break
 

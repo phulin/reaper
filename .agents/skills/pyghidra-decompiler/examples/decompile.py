@@ -1,11 +1,13 @@
 from ghidra.app.decompiler import DecompInterface, DecompileOptions
 from ghidra.util.task import TaskMonitor
 
+
 def get_decompiler(program):
     decomp = DecompInterface()
     decomp.setOptions(DecompileOptions())
     decomp.openProgram(program)
     return decomp
+
 
 # Decompile a function
 decomp = get_decompiler(program)

@@ -9,7 +9,16 @@ dtm.findDataTypes("MyStruct", results)
 
 # Built-in primitives (no resolve needed)
 from ghidra.program.model.data import (
-    ByteDataType, WordDataType, DWordDataType, QWordDataType,
-    IntegerDataType, LongDataType, CharDataType, BooleanDataType,
-    FloatDataType, DoubleDataType, PointerDataType, VoidDataType
+    ByteDataType,
+    WordDataType,
+    DWordDataType,
+    QWordDataType,
+    IntegerDataType,
+    LongDataType,
+    CharDataType,
+    BooleanDataType,
+    FloatDataType,
+    DoubleDataType,
+    PointerDataType,
+    VoidDataType,
 )

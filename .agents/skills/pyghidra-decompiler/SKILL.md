@@ -80,6 +80,17 @@ See [examples/apply_datatype.py](examples/apply_datatype.py).
 - Retrieve a type with `dtm.getDataType("/MyStruct")` or use the `resolved` object from creation
 - Apply with `HighFunctionDBUtil.updateDBVariable(sym, None, resolved_type, SourceType.USER_DEFINED)`
 
+## Splitting Merged Decompiler Variables
+
+When a decompiler local is really multiple lifetimes merged into one `HighVariable`, use
+[`/Users/phulin/Documents/Projects/reaper/scripts/split_ghidra_variable.py`](/Users/phulin/Documents/Projects/reaper/scripts/split_ghidra_variable.py)
+instead of hand-rolling the merge-group logic each time.
+
+- The script lists locals that contain multiple merge groups.
+- It can select a split target by symbol name or by storage location, with optional `--pc-address` and `--representative` filters.
+- It uses `HighFunction.splitOutMergeGroup()` and can optionally rename both the original and split variables, then saves and re-decompiles to confirm persistence.
+- Typical workflow: list candidates for a function first, then rerun with `--merge-group` plus either `--symbol-name` or `--storage`.
+
 ## Looking Up Existing Data Types
 
 See [examples/lookup_datatypes.py](examples/lookup_datatypes.py).
