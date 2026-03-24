@@ -65,8 +65,8 @@ ENV/
 .DS_Store
 
 task.md
-working_notes.md
-functions.md
+preliminary_conclusions.md
+report.md
 *.elf
 *.so
 *.exe

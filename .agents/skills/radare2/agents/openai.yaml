@@ -1,0 +1,4 @@
+interface:
+  display_name: "Radare2"
+  short_description: "Reverse engineer binaries with Radare2"
+  default_prompt: "Use $radare2 to analyze this binary and summarize the important findings."
