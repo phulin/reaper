@@ -45,6 +45,7 @@ If `main` is missing, inspect `entry0`, imports, exported symbols, and strings f
 - Prefer targeted inspection with `s`, `pdf`, `afb`, `axt`, and `axf` over whole-program brute force.
 - Use `-w` only when the task explicitly requires patching bytes or instructions.
 - Use `-d` only when static analysis is insufficient or runtime state matters.
+- To avoid context pollution, route stderr to `/dev/null` when running a command unless the command failed, in which case rerun without the redirection.
 
 ## Common Workflows
 
