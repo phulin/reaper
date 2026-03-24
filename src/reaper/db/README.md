@@ -7,7 +7,7 @@ Database layer for Reaper, built on SQLAlchemy and Alembic.
 - `__init__.py`: re-exports the primary database types and helpers.
 - `base.py`: declarative base used by all ORM models.
 - `config.py`: environment-driven database settings, including `REAPER_DATABASE_URL`.
-- `models.py`: ORM models for functions, annotations, call graph edges, modules, and data types.
+- `models.py`: ORM models for targets, functions, annotations, call graph edges, modules, and data types.
 - `session.py`: engine and session-factory helpers.
 
 ## Subpackages

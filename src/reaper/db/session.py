@@ -14,4 +14,6 @@ def create_engine(settings: DatabaseSettings | None = None) -> Engine:
 def create_session_factory(
     settings: DatabaseSettings | None = None,
 ) -> sessionmaker[Session]:
-    return sessionmaker(bind=create_engine(settings), autoflush=False, expire_on_commit=False)
+    return sessionmaker(
+        bind=create_engine(settings), autoflush=False, expire_on_commit=False
+    )
