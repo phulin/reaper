@@ -67,6 +67,7 @@ ENV/
 task.md
 preliminary_conclusions.md
 report.md
+/analysis/
 *.elf
 *.so
 *.exe
