@@ -1,0 +1,10 @@
+[project]
+name = "reaper"
+version = "0.1.0"
+description = "Reverse Engineering through Automated Prompt Execution and Recording"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "angr>=9.2.205",
+    "pyghidra>=3.0.2",
+]
