@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import cast
 
 import pyghidra
 from sqlalchemy import select
@@ -68,12 +69,15 @@ def main() -> int:
         )
 
     # address -> name
-    name_map: dict[int, str] = {f.address: f.proposed_name for f in functions}
+    name_map: dict[int, str] = {
+        f.address: f.proposed_name for f in functions if f.proposed_name is not None
+    }
     print(f"Loaded {len(name_map)} named functions from DB (target '{target.slug}').")
 
     # --- Apply into Ghidra ---
     pyghidra.start()
 
+    from ghidra.program.model.listing import Program
     from ghidra.program.model.symbol import SourceType
 
     project = pyghidra.open_project(str(project_path), project_name)
@@ -93,7 +97,10 @@ def main() -> int:
     from java.lang import Object
 
     consumer = Object()
-    program = domain_file.getDomainObject(consumer, True, False, None)
+    program = cast(
+        Program,
+        domain_file.getDomainObject(consumer, True, False, pyghidra.task_monitor()),
+    )
 
     renamed = 0
     skipped = 0
@@ -113,7 +120,7 @@ def main() -> int:
                 renamed += 1
         finally:
             program.endTransaction(tx, True)
-        program.getDomainFile().save(None)
+        program.getDomainFile().save(pyghidra.task_monitor())
     finally:
         program.release(consumer)
 

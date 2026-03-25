@@ -225,11 +225,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if args.merge_group is not None and args.symbol_name is None and args.storage is None:
+    if (
+        args.merge_group is not None
+        and args.symbol_name is None
+        and args.storage is None
+    ):
         raise SystemExit(
             "ERROR: provide --symbol-name or --storage when using --merge-group"
         )
-    if args.merge_group is None and (args.symbol_name is not None or args.storage is not None):
+    if args.merge_group is None and (
+        args.symbol_name is not None or args.storage is not None
+    ):
         raise SystemExit(
             "ERROR: --merge-group is required when selecting a variable to split"
         )
