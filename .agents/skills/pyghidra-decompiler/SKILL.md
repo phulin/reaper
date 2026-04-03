@@ -5,6 +5,14 @@ description: Use when writing Python scripts that read or modify decompilation o
 
 # PyGhidra Decompiler Skill
 
+## Workflow Role
+
+- Treat Ghidra as the live source of truth for an analysis run.
+- Subagents should not write to the project directly unless the main task explicitly says they own the Ghidra mutation step.
+- Prefer having subagents emit JSON findings and then having the main agent review and apply them with
+  [`/Users/phulin/Documents/Projects/reaper/scripts/apply_analysis_json_to_ghidra.py`](/Users/phulin/Documents/Projects/reaper/scripts/apply_analysis_json_to_ghidra.py).
+- Use Ghidra comments for annotations that need to persist with the program.
+
 ## Setup
 
 ```python
@@ -20,7 +28,7 @@ with pyghidra.program_context(project, "/program_name") as program:
     pass
 ```
 
-All writes to the program database **must** be wrapped in a transaction:
+All writes to the program state **must** be wrapped in a transaction:
 
 ```python
 with pyghidra.transaction(program, "Rename variables"):
@@ -101,7 +109,7 @@ See [examples/lookup_datatypes.py](examples/lookup_datatypes.py).
 
 ## Important Caveats
 
-- All database writes require a `pyghidra.transaction(program, ...)` context.
+- All program mutations require a `pyghidra.transaction(program, ...)` context.
 - After any `HighFunctionDBUtil` write, the `HighFunction` object is **stale** — call `decompileFunction()` again to get fresh results.
 - `open_program()` is deprecated; use `open_project()` + `program_context()` instead.
 - `HighFunctionDBUtil.updateDBVariable()` can flush **all** parameters if a type inconsistency is detected (not just the one you renamed).
