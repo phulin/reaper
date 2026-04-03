@@ -7,15 +7,15 @@ description: Use when Codex needs to inspect, triage, reverse engineer, or debug
 
 ## Overview
 
-Use radare2 for staged binary analysis instead of jumping straight to maximal auto-analysis. Start with fast metadata extraction and lightweight analysis, then deepen only where the target or question requires it.
+Use radare2 for staged binary analysis instead of jumping straight to maximal auto-analysis. Start with fast metadata extraction and lightweight analysis, then deepen only where the target or question requires it. In this repository, radare2 is a support tool for recovering enough meaning to name functions and variables accurately in Ghidra.
 
 ## Workflow
 
 1. Triage the binary outside the main UI first.
 2. Open it in radare2 with a minimal analysis pass.
 3. Identify entrypoints, `main`, imports, strings, and candidate functions.
-4. Inspect specific functions, basic blocks, and xrefs.
-5. Escalate to deeper analysis or debugger mode only when static inspection stops answering the question.
+4. Inspect specific functions, basic blocks, and xrefs to recover semantics that improve naming.
+5. Escalate to deeper analysis or debugger mode only when static inspection stops answering the naming question.
 
 ## Quick Start
 
@@ -87,7 +87,7 @@ If `main` is missing, inspect `entry0`, imports, exported symbols, and strings f
 When using this skill, report findings in reverse-engineering terms:
 
 - Binary format, architecture, and entrypoints.
-- Candidate high-value functions and why they matter.
-- Important strings, imports, and xrefs.
-- Control-flow observations relevant to the user’s question.
+- Proposed names or naming evidence for functions and variables.
+- Important strings, imports, and xrefs that justify those names.
+- Control-flow observations relevant to the naming problem.
 - Concrete radare2 commands that reproduce the result.

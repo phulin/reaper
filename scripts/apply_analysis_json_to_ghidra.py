@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-import pyghidra
+import pyghidra  # ty:ignore[unresolved-import]
 
 
 def default_project_name(project_path: Path) -> str:
@@ -100,7 +100,7 @@ def main() -> int:
 
     pyghidra.start()
 
-    from ghidra.program.model.data import (
+    from ghidra.program.model.data import (  # ty:ignore[unresolved-import]
         BooleanDataType,
         ByteDataType,
         CategoryPath,
@@ -118,10 +118,12 @@ def main() -> int:
         UnsignedShortDataType,
         VoidDataType,
     )
-    from ghidra.program.model.listing import CommentType
-    from ghidra.program.model.listing import Program
-    from ghidra.program.model.symbol import SourceType
-    from java.lang import Object
+    from ghidra.program.model.listing import (  # ty:ignore[unresolved-import]
+        CommentType,
+        Program,
+    )
+    from ghidra.program.model.symbol import SourceType  # ty:ignore[unresolved-import]
+    from java.lang import Object  # ty:ignore[unresolved-import]
 
     builtin_types = {
         "bool": BooleanDataType.dataType,

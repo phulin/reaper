@@ -8,10 +8,11 @@ description: Use when writing Python scripts that read or modify decompilation o
 ## Workflow Role
 
 - Treat Ghidra as the live source of truth for an analysis run.
+- The primary objective is to name every function, parameter, and local variable visible in the decompiler output.
 - Subagents should not write to the project directly unless the main task explicitly says they own the Ghidra mutation step.
 - Prefer having subagents emit JSON findings and then having the main agent review and apply them with
   [`/Users/phulin/Documents/Projects/reaper/scripts/apply_analysis_json_to_ghidra.py`](/Users/phulin/Documents/Projects/reaper/scripts/apply_analysis_json_to_ghidra.py).
-- Use Ghidra comments for annotations that need to persist with the program.
+- Use Ghidra comments for annotations that need to persist with the program, but treat comments and types as secondary to naming coverage.
 
 ## Setup
 
@@ -59,6 +60,7 @@ See [examples/rename_variables.py](examples/rename_variables.py).
 - Iterate `hf.getLocalSymbolMap().getSymbols()` to find a symbol by name
 - Call `HighFunctionDBUtil.updateDBVariable(sym, new_name, new_type, SourceType.USER_DEFINED)` inside a transaction
 - After any write, the existing `HighFunction` is **stale** — re-decompile to get updated names
+- Prefer spending effort on naming unnamed or weakly named locals before adding extra commentary
 
 ## Renaming Parameters
 
@@ -66,12 +68,14 @@ See [examples/rename_parameters.py](examples/rename_parameters.py).
 
 - Use `sym_map.getParamSymbol(i)` to access parameters by index
 - Use `HighFunctionDBUtil.commitParamsToDatabase()` to commit all params at once
+- Parameter naming is part of the core completion criterion, not an optional cleanup step
 
 ## Committing All Local Names
 
 See [examples/commit_locals.py](examples/commit_locals.py).
 
 - `HighFunctionDBUtil.commitLocalNamesToDatabase(hf, SourceType.USER_DEFINED)` persists all local variable names
+- Use this when it helps close naming coverage quickly after you have validated the local names
 
 ## Creating Data Structures
 

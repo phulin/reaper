@@ -40,7 +40,7 @@ def main() -> int:
         args.project_name,
     )
 
-    from ghidra.app.decompiler import DecompInterface
+    from ghidra.app.decompiler import DecompInterface  # ty:ignore[unresolved-import]
 
     with pyghidra.program_context(project, "/" + args.program_name) as program:
         fm = program.getFunctionManager()

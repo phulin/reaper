@@ -245,11 +245,11 @@ def main() -> int:
 
     pyghidra.start()
 
-    from ghidra.app.decompiler import DecompInterface
-    from ghidra.program.model.pcode import HighFunctionDBUtil
-    from ghidra.program.model.symbol import SourceType
-    from ghidra.util.task import ConsoleTaskMonitor
-    from java.lang import Object
+    from ghidra.app.decompiler import DecompInterface  # ty:ignore[unresolved-import]
+    from ghidra.program.model.pcode import HighFunctionDBUtil  # ty:ignore[unresolved-import]
+    from ghidra.program.model.symbol import SourceType  # ty:ignore[unresolved-import]
+    from ghidra.util.task import ConsoleTaskMonitor  # ty:ignore[unresolved-import]
+    from java.lang import Object  # ty:ignore[unresolved-import]
 
     domain_file = open_program(project_path, project_name, args.program_name)
     consumer = Object()

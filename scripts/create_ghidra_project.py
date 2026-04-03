@@ -60,9 +60,12 @@ def main() -> int:
 
     pyghidra.start()
 
-    from ghidra.app.util.importer import AutoImporter, MessageLog
-    from java.io import File
-    from java.lang import Object
+    from ghidra.app.util.importer import (  # ty:ignore[unresolved-import]
+        AutoImporter,
+        MessageLog,
+    )
+    from java.io import File  # ty:ignore[unresolved-import]
+    from java.lang import Object  # ty:ignore[unresolved-import]
 
     project = pyghidra.open_project(str(project_path), project_name, create=True)
     monitor = pyghidra.task_monitor()

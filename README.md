@@ -1,6 +1,6 @@
 # reaper
 
-reaper is a mostly-automated reverse engineering workspace designed to be driven by a coding agent. The core idea is to give an agent a durable prompt, a small set of specialized skills, and a Ghidra-centric workflow so it can iteratively analyze binaries, persist conclusions directly in the project, and improve the surrounding tooling as it goes.
+reaper is a mostly-automated reverse engineering workspace designed to be driven by a coding agent. The core idea is to give an agent a durable prompt, a small set of specialized skills, and a Ghidra-centric workflow so it can iteratively analyze binaries and name every function, parameter, and local variable visible in decompiler output.
 
 The project is intentionally organized around agent execution rather than around a traditional CLI application. `PROMPT.md` provides the main operating loop for an autonomous analysis run, while the repo-local skills in `.agents/skills/` support focused tasks such as decompiler interaction and second-opinion analysis.
 
@@ -11,22 +11,23 @@ At a high level, an agent working in this repository is expected to:
 - import the binary into Ghidra and recover an initial function list
 - use automation first where possible, including project scripts and analysis helpers
 - keep the live analysis state in Ghidra itself
+- drive toward complete naming coverage for every function, parameter, and local variable in the decompiler
 - have subagents emit structured JSON artifacts instead of mutating the project directly
 - synthesize those artifacts into reviewed names, comments, and types before applying them to Ghidra
-- iterate until the low-level function analysis supports a high-confidence report
+- iterate until the decompiler output is comprehensively named
 
 This makes the repository part reverse engineering toolkit and part agent harness, with Ghidra as the durable state for an analysis run.
 
 ## Agent-First Workflow
 
-The intended entrypoint for real work is [PROMPT.md](/Users/phulin/Documents/Projects/reaper/PROMPT.md). It tells a coding agent how to run an end-to-end analysis, what artifacts to maintain, and how to use subagent JSON plus Ghidra together.
+The intended entrypoint for real work is [PROMPT.md](/Users/phulin/Documents/Projects/reaper/PROMPT.md). It tells a coding agent how to run an end-to-end naming pass, what artifacts to maintain, and how to use subagent JSON plus Ghidra together.
 
 The included repo-local skills currently cover:
 
 - `pyghidra-decompiler`: guidance for scripting decompilation-oriented work through PyGhidra
 - `radare2`: a fallback and second-opinion workflow for binary inspection and debugging
 
-The workflow is deliberately biased toward writing scripts and reusable helpers instead of doing repetitive manual analysis. If a step can be automated, the agent should automate it and feed the results back into the Ghidra project and the run's JSON artifacts.
+The workflow is deliberately biased toward writing scripts and reusable helpers instead of doing repetitive manual analysis. If a step can be automated, the agent should automate it and feed the results back into the Ghidra project and the run's JSON artifacts, especially when that improves naming coverage.
 
 ## Repository Map
 
