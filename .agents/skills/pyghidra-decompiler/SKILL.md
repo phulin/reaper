@@ -57,10 +57,11 @@ See [examples/iterate_functions.py](examples/iterate_functions.py).
 
 See [examples/rename_variables.py](examples/rename_variables.py).
 
-- Iterate `hf.getLocalSymbolMap().getSymbols()` to find a symbol by name
+- Iterate `hf.getLocalSymbolMap().getSymbols()` to inspect candidate locals, including their storage via `symbol.getStorage()`
 - Call `HighFunctionDBUtil.updateDBVariable(sym, new_name, new_type, SourceType.USER_DEFINED)` inside a transaction
 - After any write, the existing `HighFunction` is **stale** — re-decompile to get updated names
 - Prefer spending effort on naming unnamed or weakly named locals before adding extra commentary
+- When emitting JSON artifacts or any other deferred rename plan, identify locals by storage string rather than the current symbol name; names are expected to change during incremental cleanup, but storage stays stable
 
 ## Renaming Parameters
 
@@ -102,6 +103,7 @@ instead of hand-rolling the merge-group logic each time.
 - It can select a split target by symbol name or by storage location, with optional `--pc-address` and `--representative` filters.
 - It uses `HighFunction.splitOutMergeGroup()` and can optionally rename both the original and split variables, then saves and re-decompiles to confirm persistence.
 - Typical workflow: list candidates for a function first, then rerun with `--merge-group` plus either `--symbol-name` or `--storage`.
+- For automation and artifact-driven workflows, prefer `--storage`; name-based selection is mainly a convenience for one-off interactive use
 
 ## Looking Up Existing Data Types
 
