@@ -1,20 +1,21 @@
 ---
-name: pyghidra-decompiler
-description: Use when writing Python scripts that read or modify decompilation output using PyGhidra.
+name: pyghidra
+description: Use when writing Python scripts that read disassembly, read decompilation output, or modify Ghidra program state using PyGhidra.
 ---
 
-# PyGhidra Decompiler Skill
+# PyGhidra Skill
 
 ## Workflow Role
 
 - Treat Ghidra as the live source of truth for an analysis run.
 - The primary objective is to name every function, parameter, and local variable visible in the decompiler output.
 - Subagents should not write to the project directly unless the main task explicitly says they own the Ghidra mutation step.
-- Prefer having subagents emit JSON findings and then having the main agent review and apply them with
-  [`/Users/phulin/Documents/Projects/reaper/scripts/apply_analysis_json_to_ghidra.py`](/Users/phulin/Documents/Projects/reaper/scripts/apply_analysis_json_to_ghidra.py).
+- Prefer having subagents emit JSON findings and then having the main agent review and apply them with `scripts/apply_analysis_json_to_ghidra.py`.
 - Use Ghidra comments for annotations that need to persist with the program, but treat comments and types as secondary to naming coverage.
 
 ## Setup
+
+For scripts that mutate the Ghidra database, open the program through PyGhidra's normal project/program context:
 
 ```python
 import pyghidra
@@ -26,6 +27,30 @@ pyghidra.start()
 project = pyghidra.open_project("/path/to/project_dir", "project_name")
 with pyghidra.program_context(project, "/program_name") as program:
     # work with program here
+    pass
+```
+
+For read-only scripts, open the Ghidra project read-only. PyGhidra's
+`open_project()` wrapper does not currently expose this option; use the
+underlying Ghidra project manager:
+
+```python
+import pyghidra
+
+
+def open_read_only_project(project_path, project_name):
+    from ghidra.framework.model import ProjectLocator
+    from ghidra.pyghidra import PyGhidraProjectManager
+
+    project_locator = ProjectLocator(str(project_path), project_name)
+    project_manager = PyGhidraProjectManager()
+    return project_manager.openProject(project_locator, True, False)
+
+
+pyghidra.start()
+project = open_read_only_project("/path/to/project_dir", "project_name")
+with pyghidra.program_context(project, "/program_name") as program:
+    # read-only inspection here
     pass
 ```
 
@@ -46,12 +71,21 @@ See [examples/decompile.py](examples/decompile.py).
 - `result.getHighFunction()` returns the structured `HighFunction` representation
 - Call `decomp.dispose()` when done
 
+## Getting Disassembly
+
+See [examples/disassemble.py](examples/disassemble.py).
+
+- `program.getListing()` returns the listing used to inspect instructions and data
+- `listing.getInstructionAt(address)` gets one instruction at an address
+- `listing.getInstructions(address_set_view, True)` iterates instructions forward over a function body or address set
+- Use `instruction.getFallThrough()` and `instruction.getReferencesFrom()` when following control flow beyond a simple sequential dump
+
 ## Iterating Functions
 
 See [examples/iterate_functions.py](examples/iterate_functions.py).
 
 - `func_mgr.getFunctions(True)` iterates all functions
-- `func_mgr.getFunctionContaining(toAddr(0x1234))` finds a function by address
+- `func_mgr.getFunctionContaining(address_space.getAddress(0x1234))` finds a function by address
 
 ## Renaming Variables
 
@@ -116,6 +150,7 @@ See [examples/lookup_datatypes.py](examples/lookup_datatypes.py).
 ## Important Caveats
 
 - All program mutations require a `pyghidra.transaction(program, ...)` context.
+- Use `PyGhidraProjectManager().openProject(project_locator, True, False)` for scripts that only inspect disassembly, decompilation, functions, symbols, data types, or bytes.
 - After any `HighFunctionDBUtil` write, the `HighFunction` object is **stale** — call `decompileFunction()` again to get fresh results.
 - `open_program()` is deprecated; use `open_project()` + `program_context()` instead.
 - `HighFunctionDBUtil.updateDBVariable()` can flush **all** parameters if a type inconsistency is detected (not just the one you renamed).
