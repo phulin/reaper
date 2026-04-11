@@ -11,6 +11,15 @@ def parse_address(value: str) -> int:
     return int(value, 0)
 
 
+def open_project_read_only(project_path: Path, project_name: str):
+    from ghidra.framework.model import ProjectLocator  # ty:ignore[unresolved-import]
+    from ghidra.pyghidra import PyGhidraProjectManager  # ty:ignore[unresolved-import]
+
+    project_locator = ProjectLocator(str(project_path), project_name)
+    project_manager = PyGhidraProjectManager()
+    return project_manager.openProject(project_locator, True, False)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Decompile selected functions from an existing Ghidra project."
@@ -35,10 +44,7 @@ def main() -> int:
 
     pyghidra.start()
 
-    project = pyghidra.open_project(
-        str(args.project_path.resolve()),
-        args.project_name,
-    )
+    project = open_project_read_only(args.project_path.resolve(), args.project_name)
 
     from ghidra.app.decompiler import DecompInterface  # ty:ignore[unresolved-import]
 
