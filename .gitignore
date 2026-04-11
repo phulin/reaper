@@ -67,6 +67,8 @@ ENV/
 task.md
 preliminary_conclusions.md
 report.md
+/artifacts/
+/specs/
 /analysis*/
 *.elf
 *.so
