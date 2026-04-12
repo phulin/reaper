@@ -65,6 +65,8 @@ ENV/
 .DS_Store
 
 task.md
+task_plan.md
+notes.md
 preliminary_conclusions.md
 report.md
 /artifacts/
@@ -72,6 +74,7 @@ report.md
 /analysis*/
 *.elf
 *.so
-*.exe
 *.dll
 *.bin
+*.exe
+!src/**/*.exe
