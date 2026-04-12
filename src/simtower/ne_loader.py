@@ -84,6 +84,40 @@ class NERelocation:
 
 
 @dataclass
+class NEResourceEntry:
+    """One resource entry (NAMEINFO) from the NE resource table."""
+
+    type_id: int  # integer resource type (high bit stripped)
+    res_id: int  # integer resource ID (high bit stripped)
+    file_offset: int  # absolute byte offset in file
+    length: int  # length in bytes
+    flags: int
+
+    # Standard NE resource types
+    RT_CURSOR = 1
+    RT_BITMAP = 2
+    RT_ICON = 3
+    RT_MENU = 4
+    RT_DIALOG = 5
+    RT_STRING = 6
+    RT_FONTDIR = 7
+    RT_FONT = 8
+    RT_ACCELERATOR = 9
+    RT_RCDATA = 10
+    RT_GROUP_CURSOR = 12
+    RT_GROUP_ICON = 14
+
+
+@dataclass
+class NEResourceTypeGroup:
+    """One TYPEINFO block from the NE resource table."""
+
+    type_id: int  # integer resource type (high bit stripped), or raw offset for named types
+    type_name: str = ""  # non-empty for named (string) resource types
+    entries: list[NEResourceEntry] = field(default_factory=list)
+
+
+@dataclass
 class NEHeader:
     """Parsed NE header and associated tables."""
 
@@ -102,6 +136,48 @@ class NEHeader:
     segments: list[NESegmentEntry] = field(default_factory=list)
     module_names: list[str] = field(default_factory=list)
     module_name: str = ""
+    resources: list[NEResourceTypeGroup] = field(default_factory=list)
+
+    def find_resource(
+        self, type_id: int, res_id: int
+    ) -> NEResourceEntry | None:
+        """Find a resource by integer type and ID."""
+        for group in self.resources:
+            if group.type_id == type_id:
+                for entry in group.entries:
+                    if entry.res_id == res_id:
+                        return entry
+                return None
+        return None
+
+    def find_resource_by_name(
+        self, type_name: str, res_id: int
+    ) -> NEResourceEntry | None:
+        """Find a resource by string type name and integer ID.
+
+        Checks both named resource groups (where the NE table stores a string
+        name) and custom integer types (0x7F01+), searching all groups for a
+        matching resource ID.
+        """
+        type_name_upper = type_name.upper()
+        # First try: match against groups that have an explicit name
+        for group in self.resources:
+            if group.type_name and group.type_name.upper() == type_name_upper:
+                for entry in group.entries:
+                    if entry.res_id == res_id:
+                        return entry
+                return None
+
+        # Second try: search all custom types (>= 0x7F01) for the res_id.
+        # Win16 resource compiler maps custom string names to sequential
+        # integer IDs starting at 0xFF01 (= 0x7F01 after masking).
+        for group in self.resources:
+            if group.type_id >= 0x7F01:
+                for entry in group.entries:
+                    if entry.res_id == res_id:
+                        return entry
+
+        return None
 
     @classmethod
     def parse(cls, data: bytes) -> NEHeader:
@@ -123,7 +199,7 @@ class NEHeader:
         num_segments = struct.unpack_from("<H", data, ne_off + 0x1C)[0]
         num_module_refs = struct.unpack_from("<H", data, ne_off + 0x1E)[0]
         seg_table_off = struct.unpack_from("<H", data, ne_off + 0x22)[0]
-        res_table_off = struct.unpack_from("<H", data, ne_off + 0x24)[0]  # noqa: F841
+        res_table_off = struct.unpack_from("<H", data, ne_off + 0x24)[0]
         res_name_off = struct.unpack_from("<H", data, ne_off + 0x26)[0]
         mod_ref_off = struct.unpack_from("<H", data, ne_off + 0x28)[0]
         imp_name_off = struct.unpack_from("<H", data, ne_off + 0x2A)[0]
@@ -161,6 +237,56 @@ class NEHeader:
                     min_alloc=min_alloc,
                 )
             )
+
+        # Parse resource table
+        if res_table_off != 0:
+            abs_rt = ne_off + res_table_off
+            rsc_align_shift = struct.unpack_from("<H", data, abs_rt)[0]
+            pos = abs_rt + 2
+            while True:
+                rt_type_id = struct.unpack_from("<H", data, pos)[0]
+                if rt_type_id == 0:
+                    break
+                rt_count = struct.unpack_from("<H", data, pos + 2)[0]
+                # Skip rtReserved (4 bytes)
+                pos += 8
+
+                # Decode type: high bit set means integer type
+                type_name = ""
+                if rt_type_id & 0x8000:
+                    actual_type = rt_type_id & 0x7FFF
+                else:
+                    # Name offset relative to resource table start
+                    name_addr = abs_rt + rt_type_id
+                    name_len = data[name_addr]
+                    type_name = data[name_addr + 1 : name_addr + 1 + name_len].decode("ascii", errors="replace")
+                    actual_type = rt_type_id  # keep raw offset as type_id
+
+                group = NEResourceTypeGroup(type_id=actual_type, type_name=type_name)
+
+                for _j in range(rt_count):
+                    rn_offset, rn_length, rn_flags, rn_id = struct.unpack_from(
+                        "<HHHH", data, pos
+                    )
+                    # Skip rnReserved (4 bytes)
+                    pos += 12
+
+                    # Decode resource ID: high bit set means integer ID
+                    if rn_id & 0x8000:
+                        actual_id = rn_id & 0x7FFF
+                    else:
+                        actual_id = rn_id  # name offset
+
+                    entry = NEResourceEntry(
+                        type_id=actual_type,
+                        res_id=actual_id,
+                        file_offset=rn_offset << rsc_align_shift,
+                        length=rn_length << rsc_align_shift,
+                        flags=rn_flags,
+                    )
+                    group.entries.append(entry)
+
+                hdr.resources.append(group)
 
         # Parse module reference table -> imported names
         abs_mod = ne_off + mod_ref_off

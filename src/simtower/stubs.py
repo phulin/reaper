@@ -56,7 +56,7 @@ STUB_DEFS: list[StubDef] = [
     StubDef("GDI", "CreateCompatibleDC",     52, 2),   # (word)
     StubDef("GDI", "CreateFontIndirect",     57, 4),   # (ptr)
     StubDef("GDI", "CreatePen",              61, 8),   # (s_word s_word long)
-    StubDef("GDI", "CreateRectRgn",          65, 8),   # (s_word s_word s_word s_word)
+    StubDef("GDI", "CreateRectRgnIndirect",   65, 4),   # (ptr)
     StubDef("GDI", "CreateSolidBrush",       66, 4),   # (long)
     StubDef("GDI", "DeleteDC",               68, 2),   # (word)
     StubDef("GDI", "DeleteObject",           69, 2),   # (word)
@@ -230,7 +230,7 @@ STUB_DEFS: list[StubDef] = [
     StubDef("WAVMIX16", "WavMixInit",            3, 0),
     StubDef("WAVMIX16", "WavMixActivate",        4, 4),
     StubDef("WAVMIX16", "WavMixOpenChannel",     5, 8),
-    StubDef("WAVMIX16", "WavMixOpenWav",         6, 12),
+    StubDef("WAVMIX16", "WavMixOpenWav",         6, 8),
     StubDef("WAVMIX16", "WavMixPlay",            7, 6),
     StubDef("WAVMIX16", "WavMixFlushChannel",    9, 8),
     StubDef("WAVMIX16", "WavMixCloseChannel",   10, 8),
@@ -240,13 +240,14 @@ STUB_DEFS: list[StubDef] = [
     # ── WIN87EM ─────────────────────────────────────────────────────
     StubDef("WIN87EM", "__FPMATH", 1, 0),
 
-    # ── WING (6 ordinals) ──────────────────────────────────────────
-    StubDef("WING", "WinGRecommendDIBFormat", 1001, 4),
-    StubDef("WING", "WinGCreateDC",           1002, 0),
-    StubDef("WING", "WinGCreateBitmap",       1003, 10),
-    StubDef("WING", "WinGBitBlt",             1006, 16),
-    StubDef("WING", "WinGSetDIBColorTable",   1009, 10),
-    StubDef("WING", "WinGGetDIBColorTable",   1010, 10),
+    # ── WING (6 ordinals) — verified from Wine wing.dll16.spec ────
+    StubDef("WING", "WinGCreateDC",             1001, 0),
+    StubDef("WING", "WinGRecommendDIBFormat",   1002, 4),   # (ptr)
+    StubDef("WING", "WinGCreateBitmap",         1003, 10),  # (word ptr ptr)
+    StubDef("WING", "WinGSetDIBColorTable",     1006, 10),  # (word word word ptr)
+    StubDef("WING", "WinGGetDIBColorTable",     1005, 10),  # (word word word ptr)
+    StubDef("WING", "WinGStretchBlt",            1009, 20),  # (word*10)
+    StubDef("WING", "WinGBitBlt",               1010, 16),  # (word*8)
 ]
 # fmt: on
 
