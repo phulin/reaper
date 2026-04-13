@@ -137,6 +137,9 @@ class NEHeader:
     module_names: list[str] = field(default_factory=list)
     module_name: str = ""
     resources: list[NEResourceTypeGroup] = field(default_factory=list)
+    # Mapping from uppercase type name to integer type_id (0x8000 stripped),
+    # built from the NE name table resource (RT_NAMETABLE = 0x800F).
+    _name_table: dict[str, int] = field(default_factory=dict)
 
     def find_resource(
         self, type_id: int, res_id: int
@@ -155,27 +158,28 @@ class NEHeader:
     ) -> NEResourceEntry | None:
         """Find a resource by string type name and integer ID.
 
-        Checks both named resource groups (where the NE table stores a string
-        name) and custom integer types (0x7F01+), searching all groups for a
-        matching resource ID.
+        Resolves the string type name to an integer type ID using the NE
+        name table (RT_NAMETABLE, type 0x800F), mirroring Win16
+        FindResource behavior.  Falls back to matching against resource
+        groups that carry an explicit string name.
         """
         type_name_upper = type_name.upper()
-        # First try: match against groups that have an explicit name
+
+        # Primary path: resolve via the name table (like Wine's
+        # NE_FindNameTableId).  The name table maps string type names
+        # to integer type IDs.
+        resolved_type = self._name_table.get(type_name_upper)
+        if resolved_type is not None:
+            return self.find_resource(resolved_type, res_id)
+
+        # Fallback: match against groups that have an explicit name
+        # stored in the resource table itself (type_id without 0x8000).
         for group in self.resources:
             if group.type_name and group.type_name.upper() == type_name_upper:
                 for entry in group.entries:
                     if entry.res_id == res_id:
                         return entry
                 return None
-
-        # Second try: search all custom types (>= 0x7F01) for the res_id.
-        # Win16 resource compiler maps custom string names to sequential
-        # integer IDs starting at 0xFF01 (= 0x7F01 after masking).
-        for group in self.resources:
-            if group.type_id >= 0x7F01:
-                for entry in group.entries:
-                    if entry.res_id == res_id:
-                        return entry
 
         return None
 
@@ -305,6 +309,29 @@ class NEHeader:
             hdr.module_name = data[abs_res + 1 : abs_res + 1 + name_len].decode(
                 "ascii"
             )
+
+        # Build name table: resolve string type names → integer type IDs
+        # from the RT_NAMETABLE resource (type 15 / 0x800F).
+        # Each entry: WORD length, WORD type_id, WORD res_id, then
+        # null-terminated type name string followed by res name string.
+        RT_NAMETABLE = 15
+        nametab_entry = hdr.find_resource(RT_NAMETABLE, 1)
+        if nametab_entry is not None:
+            p = nametab_entry.file_offset
+            end = p + nametab_entry.length
+            while p + 6 <= end:
+                entry_len = struct.unpack_from("<H", data, p)[0]
+                if entry_len == 0:
+                    break
+                nt_type_id = struct.unpack_from("<H", data, p + 2)[0]
+                # Extract null-terminated type name at p+6
+                name_start = p + 6
+                name_end = data.index(b"\x00", name_start, p + entry_len)
+                tn = data[name_start:name_end].decode("ascii", errors="replace")
+                if tn:
+                    # Strip 0x8000 to match our stored group.type_id
+                    hdr._name_table[tn.upper()] = nt_type_id & 0x7FFF
+                p += entry_len
 
         return hdr
 

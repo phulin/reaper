@@ -82,6 +82,7 @@ DS_OFF = {
     "ent_link_count": 0xBC74,  # uint16
     "sim_table_ptr": 0xC04E,  # uint16  (near ptr / selector)
     "sim_count": 0xC052,  # int32
+    "primary_family_ledger_total": 0xC13A,  # int32 — population ledger
     "floor_tables_ptr": 0xBE6E,  # start of far-pointer array (120 × 4-byte far ptrs)
     # interleaved with support table at 0xBE6A
     "security_placed": 0xC19E,  # uint8
@@ -3182,15 +3183,15 @@ class SimTowerEmulator:
         day_counter = self._ds_i32(d["day_counter"])
         daypart = self._ds_u8(d["daypart_index"])
         stars = self._ds_u16(d["star_count"])
-        cash = self._ds_i32(d["cash_balance"])
+        cash = self._ds_i32(d["cash_balance"]) * 100
         cal_phase = self._ds_u8(d["calendar_phase"])
         metro = self._ds_i16(d["metro_floor"])
-        sim_count = self._ds_i32(d["sim_count"])
+        pop = self._ds_i32(d["primary_family_ledger_total"])
 
         print(
             f"TICK day={day_counter} tick={day_tick} daypart={daypart} "
             f"stars={stars} cash=${cash:,} cal_phase={cal_phase} "
-            f"metro={metro} sims={sim_count}"
+            f"metro={metro} pop={pop}"
         )
 
         # Gate flags
@@ -3222,6 +3223,7 @@ class SimTowerEmulator:
 
         # Sim table summary
         sim_base = self._resolve_sim_table_base()
+        sim_count = self._ds_i32(d["sim_count"])
         if sim_base is None or sim_count <= 0:
             return
 
@@ -3262,6 +3264,8 @@ class SimTowerEmulator:
         if address != self._scheduler_linear:
             return
         self._tick_hook_count += 1
+        if self._tick_hook_count == 1:
+            pass  # First scheduler tick — init is complete.
         # Dump every N ticks (skip the very first call — state not yet initialized)
         if (
             self._tick_hook_count > 1
@@ -3664,6 +3668,7 @@ def main() -> None:
         # Demo: run through init, build objects, then continue simulation
         print("\n=== Phase 1: Run through initialization ===")
         try:
+
             emu.run(max_instructions=5_000_000)
         except RuntimeError as e:
             print(f"Init stopped: {e}")
