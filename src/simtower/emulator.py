@@ -139,20 +139,32 @@ FAMILY_NAMES: dict[int, str] = {
     0x28: "cathedral-e",
 }
 
-# Sim state byte → human label (from binary analysis of state machines)
+# Sim state byte → human label (from PEOPLE.md / OFFICE.md state machines)
+# Bit 6 (0x40) = in-transit flag; 0x4x = transit for 0x0x, 0x6x = transit for 0x2x
 SIM_STATE_NAMES: dict[int, str] = {
-    0x00: "init",
-    0x01: "active",
+    0x00: "at-work",
+    0x01: "lunch-start",
+    0x02: "lunch-return",
     0x03: "arrived",
-    0x05: "returning",
-    0x10: "occupied",
-    0x20: "working",
+    0x04: "sibling-sync",
+    0x05: "evening-dep",
+    0x10: "idle-ready",
+    0x20: "morning-in",
+    0x21: "to-office",
+    0x22: "from-lunch",
+    0x23: "at-lunch",
     0x24: "vacant",
-    0x25: "open",
+    0x25: "park-open",
+    0x26: "park-fail",
     0x27: "parked",
-    0x45: "transit-ret",
-    0x60: "transit-out",
-    0x62: "transit-ret2",
+    0x40: "T-to-work",
+    0x41: "T-to-lunch",
+    0x42: "T-lunch-ret",
+    0x45: "T-evening",
+    0x60: "T-morning",
+    0x61: "T-to-office",
+    0x62: "T-from-lunch",
+    0x63: "T-at-lunch",
 }
 
 # Type alias for stub handler functions
@@ -3145,24 +3157,41 @@ class SimTowerEmulator:
         return self._ds_base + raw
 
     def _resolve_sim_table_base(self) -> int | None:
-        """Return the linear base of the sim/entity table, or None."""
-        return self._resolve_near_or_selector(self._ds_u16(DS_OFF["sim_table_ptr"]))
+        """Return the linear base of the sim/entity table, or None.
+
+        sim_table_ptr is a far pointer: offset at DS+0xC04E, selector at DS+0xC050.
+        """
+        off16 = self._ds_u16(DS_OFF["sim_table_ptr"])
+        seg16 = self._ds_u16(DS_OFF["sim_table_ptr"] + 2)
+        if seg16 == 0:
+            return None
+        seg_base = self.selector_bases.get(seg16)
+        if seg_base is None:
+            return None
+        return seg_base + off16
 
     def _read_sim_record(self, base: int, idx: int) -> dict:
         off = base + idx * SIM_REC_SIZE
         rec = bytes(self.mu.mem_read(off, SIM_REC_SIZE))
-        sample_count = rec[9]
-        accumulated = struct.unpack_from("<H", rec, 14)[0]
-        stress = (0x1000 // sample_count) if sample_count > 0 else 0
+        trip_count = rec[9]
+        last_trip_tick = struct.unpack_from("<H", rec, 10)[0]
+        elapsed_packed = struct.unpack_from("<H", rec, 12)[0]
+        accumulated_elapsed = struct.unpack_from("<H", rec, 14)[0]
+        # Stress = average elapsed ticks per trip (higher = worse)
+        stress = (accumulated_elapsed // trip_count) if trip_count > 0 else 0
         return {
             "floor": rec[0],
             "subtype": rec[1],
             "occupant": struct.unpack_from("<H", rec, 2)[0],
             "family": rec[4],
             "state": rec[5],
-            "aux": (rec[6], rec[7], rec[8]),
-            "samples": sample_count,
-            "accumulated": accumulated,
+            "route_mode": rec[6],
+            "spawn_floor": rec[7],
+            "route_carrier": rec[8],
+            "trip_count": trip_count,
+            "last_trip_tick": last_trip_tick,
+            "elapsed_packed": elapsed_packed,
+            "accumulated_elapsed": accumulated_elapsed,
             "stress": stress,
         }
 
