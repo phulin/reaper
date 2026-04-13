@@ -2797,7 +2797,7 @@ class SimTowerEmulator:
         )
         # Trace hook for debugging — keeps a ring buffer of recent instructions
         self._trace_buf: list[tuple[int, int, int]] = []  # (cs, ip, size)
-        self.mu.hook_add(UC_HOOK_CODE, self._on_trace)
+        # self.mu.hook_add(UC_HOOK_CODE, self._on_trace)
 
     def _handle_dpmi(self, mu: Uc) -> None:
         """Handle INT 31h (DPMI) calls."""
@@ -3668,7 +3668,6 @@ def main() -> None:
         # Demo: run through init, build objects, then continue simulation
         print("\n=== Phase 1: Run through initialization ===")
         try:
-
             emu.run(max_instructions=5_000_000)
         except RuntimeError as e:
             print(f"Init stopped: {e}")
