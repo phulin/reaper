@@ -41,6 +41,7 @@ from unicorn.x86_const import (
 from simtower.constants import (
     CALL_TRAP_BASE,
     DS_OFF,
+    FACILITY_WIDTHS,
     FAMILY_NAMES,
     FIRST_SELECTOR,
     GDT_ADDR,
@@ -1439,13 +1440,25 @@ def _apply_build_json(emu: SimTowerEmulator, path: str) -> None:
 
     JSON format:
     {
-        "floor_extent": {"left": 100, "right": 200},
+        "floor_extent": {
+            "0": {"left": 80, "right": 220},
+            "1": {"left": 100, "right": 200},
+            "2": {"left": 100, "right": 200}
+        },
         "facilities": [
-            {"type": "office", "floor": 1, "left": 100, "right": 109},
+            {"type": "office", "floor": 1, "left": 100},
+            {"type": "office", "floor": 1, "left": 109},
             {"type": "stairs", "floor": 1, "left": 100},
             ...
         ]
     }
+
+    floor_extent keys are floor numbers (as strings for JSON compat).
+    Floor 0 extent is used as the lobby span. Each above-grade floor
+    gets a support span from its entry. Floors without an explicit entry
+    inherit the widest extent from the entries below them.
+
+    Facility "right" is optional — computed from FACILITY_WIDTHS when omitted.
 
     Supported facility types: any FAMILY_NAMES value (e.g. "office", "single",
     "condo", "retail", "security", "restaurant", ...) plus "lobby" and "stairs".
@@ -1460,15 +1473,40 @@ _NAME_TO_TYPE: dict[str, int] = {v: k for k, v in FAMILY_NAMES.items()}
 _NAME_TO_TYPE["lobby"] = 0x18
 
 
+def _resolve_type_code(name: str) -> int | None:
+    """Resolve a facility name to a type code, or None if unknown."""
+    tc = _NAME_TO_TYPE.get(name)
+    if tc is not None:
+        return tc
+    try:
+        return int(name, 0)
+    except ValueError:
+        return None
+
+
+def _resolve_right(fac: dict, type_code: int) -> int | None:
+    """Get right tile from explicit value or width lookup."""
+    if "right" in fac:
+        return fac["right"]
+    width = FACILITY_WIDTHS.get(type_code)
+    if width is None:
+        return None
+    return fac["left"] + width
+
+
 def _apply_default_build(emu: SimTowerEmulator) -> None:
     """Set the hardcoded default build plan (the old --mode=build behavior)."""
     emu._build_spec = {
-        "floor_extent": {"left": 100, "right": 200},
+        "floor_extent": {
+            "0": {"left": 100, "right": 200},
+            "1": {"left": 100, "right": 200},
+            "2": {"left": 100, "right": 200},
+        },
         "facilities": [
-            {"type": "office", "floor": 1, "left": 100, "right": 109},
-            {"type": "office", "floor": 1, "left": 109, "right": 118},
-            {"type": "office", "floor": 2, "left": 100, "right": 109},
-            {"type": "office", "floor": 2, "left": 109, "right": 118},
+            {"type": "office", "floor": 1, "left": 100},
+            {"type": "office", "floor": 1, "left": 109},
+            {"type": "office", "floor": 2, "left": 100},
+            {"type": "office", "floor": 2, "left": 109},
             {"type": "stairs", "floor": 1, "left": 100},
             {"type": "stairs", "floor": 2, "left": 100},
         ],
@@ -1482,20 +1520,31 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
     if spec is None:
         return
 
-    extent = spec.get("floor_extent", {"left": 100, "right": 200})
-    ext_l, ext_r = extent["left"], extent["right"]
+    # Parse per-floor extents
+    raw_extents: dict = spec.get("floor_extent", {})
+    floor_extents: dict[int, tuple[int, int]] = {}
+    for k, v in raw_extents.items():
+        floor_extents[int(k)] = (v["left"], v["right"])
 
-    # Write lobby and set up support spans
-    emu.write_floor_object_direct(0, type_code=0x18, left_tile=ext_l, right_tile=ext_r)
+    if not floor_extents:
+        floor_extents[0] = (100, 200)
 
-    # Determine max floor needed for support setup
-    max_floor = 0
-    for fac in spec.get("facilities", []):
-        fl = fac.get("floor", 0)
-        if fl > max_floor:
-            max_floor = fl
+    # Write lobby on floor 0
+    lobby_l, lobby_r = floor_extents.get(0, (100, 200))
+    emu.write_floor_object_direct(0, type_code=0x18, left_tile=lobby_l, right_tile=lobby_r)
+
+    # Determine max floor needed from facilities and extents
+    max_floor = max((f.get("floor", 0) for f in spec.get("facilities", [])), default=0)
+    max_floor = max(max_floor, max(floor_extents.keys(), default=0))
+
+    # Set up per-floor support spans, widening to cover any explicit extent
+    running_l, running_r = lobby_l, lobby_r
     for fl in range(1, max_floor + 2):
-        emu.setup_floor_support(fl, left_tile=ext_l, right_tile=ext_r)
+        if fl in floor_extents:
+            fl_l, fl_r = floor_extents[fl]
+            running_l = min(running_l, fl_l)
+            running_r = max(running_r, fl_r)
+        emu.setup_floor_support(fl, left_tile=running_l, right_tile=running_r)
 
     # Place each facility
     for fac in spec.get("facilities", []):
@@ -1504,23 +1553,38 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
 
         if ftype == "stairs":
             emu.build_stairs(top_floor_logical=floor, left_tile=fac["left"])
-        elif ftype == "lobby":
-            emu.write_floor_object_direct(
-                floor, type_code=0x18, left_tile=fac["left"], right_tile=fac["right"]
-            )
-        else:
-            type_code = _NAME_TO_TYPE.get(ftype)
-            if type_code is None:
-                log.warning("Unknown facility type %r, skipping", ftype)
+            continue
+
+        type_code = _resolve_type_code(ftype)
+        if type_code is None:
+            log.warning("Unknown facility type %r, skipping", ftype)
+            continue
+
+        if ftype == "lobby":
+            right = _resolve_right(fac, type_code)
+            if right is None:
+                log.warning("Cannot determine width for lobby, skipping")
                 continue
-            emu.build_object(
-                type_code=type_code,
-                floor_logical=floor,
-                left_tile=fac["left"],
-                right_tile=fac["right"],
-                variant=fac.get("variant", 0),
-                aux=fac.get("aux", 0),
+            emu.write_floor_object_direct(
+                floor, type_code=0x18, left_tile=fac["left"], right_tile=right
             )
+            continue
+
+        right = _resolve_right(fac, type_code)
+        if right is None:
+            log.warning(
+                "No known width for type %r (0x%02x) and no 'right' given, skipping",
+                ftype, type_code,
+            )
+            continue
+        emu.build_object(
+            type_code=type_code,
+            floor_logical=floor,
+            left_tile=fac["left"],
+            right_tile=right,
+            variant=fac.get("variant", 0),
+            aux=fac.get("aux", 0),
+        )
 
 
 def main() -> None:

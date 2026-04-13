@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from simtower.emulator import SimTowerEmulator
     from simtower.stubs import StubDef
 
 # ── Memory layout ────────────────────────────────────────────────────
@@ -95,6 +96,48 @@ FAMILY_NAMES: dict[int, str] = {
     0x26: "cathedral-c",
     0x27: "cathedral-d",
     0x28: "cathedral-e",
+}
+
+# Family code → tile width (from binary recovery: segment 1200 jump table)
+FACILITY_WIDTHS: dict[int, int] = {
+    0x00: 1,   # floor
+    0x01: 4,   # std elevator
+    0x03: 4,   # single room
+    0x04: 8,   # twin room
+    0x05: 16,  # suite
+    0x06: 24,  # restaurant
+    0x07: 9,   # office
+    0x08: 2,
+    0x09: 16,  # condo
+    0x0A: 12,  # fast food
+    0x0B: 1,   # lobby
+    0x0C: 16,  # retail/shop
+    0x0D: 26,  # sky lobby / medical
+    0x0E: 8,   # security
+    0x12: 24,  # cinema
+    0x13: 24,  # cinema (lower)
+    0x14: 8,   # recycling
+    0x16: 8,   # stairs
+    0x17: 8,
+    0x18: 4,   # parking
+    0x1B: 8,   # escalator
+    0x1C: 8,
+    0x1D: 24,  # party hall
+    0x1E: 24,  # party hall (lower)
+    0x1F: 30,  # VIP suite
+    0x20: 30,
+    0x21: 30,
+    0x22: 7,   # entertainment link half
+    0x23: 7,
+    0x24: 28,  # cathedral
+    0x25: 28,
+    0x26: 28,
+    0x27: 28,
+    0x28: 28,
+    0x2A: 6,   # express elevator
+    0x2B: 4,   # service elevator
+    0x2C: 1,   # vertical anchor
+    0x30: 8,
 }
 
 # Sim state byte → human label (from PEOPLE.md / OFFICE.md state machines)
