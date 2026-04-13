@@ -10,6 +10,7 @@ that need real behaviour (GlobalAlloc, GlobalLock, etc.).
 
 from __future__ import annotations
 
+import json
 import logging
 import struct
 from collections import defaultdict
@@ -116,6 +117,8 @@ class SimTowerEmulator:
         self._next_hwnd: int = 0x100
         self._tick_count: int = 0
         self._show_sims: bool = False
+        self._output_json: bool = False
+        self._build_spec: dict | None = None
 
         # Handler dispatch: linear stub addr -> handler function
         self._stub_handlers: dict[int, StubHandler] = {}
@@ -889,84 +892,121 @@ class SimTowerEmulator:
             )
         return objs
 
-    def dump_tick_state(self, show_sims: bool | None = None) -> None:
-        """Print a summary of the current simulation state."""
-        if show_sims is None:
-            show_sims = self._show_sims
+    def _collect_tick_state(self, show_sims: bool) -> dict:
+        """Collect the current simulation state as a dict."""
         d = DS_OFF
-        day_tick = self._ds_u16(d["day_tick"])
-        day_counter = self._ds_i32(d["day_counter"])
-        daypart = self._ds_u8(d["daypart_index"])
-        stars = self._ds_u16(d["star_count"])
-        cash = self._ds_i32(d["cash_balance"]) * 100
-        cal_phase = self._ds_u8(d["calendar_phase"])
-        metro = self._ds_i16(d["metro_floor"])
-        pop = self._ds_i32(d["primary_family_ledger_total"])
+        state: dict = {
+            "day": self._ds_i32(d["day_counter"]),
+            "tick": self._ds_u16(d["day_tick"]),
+            "daypart": self._ds_u8(d["daypart_index"]),
+            "stars": self._ds_u16(d["star_count"]),
+            "cash": self._ds_i32(d["cash_balance"]) * 100,
+            "calendar_phase": self._ds_u8(d["calendar_phase"]),
+            "metro_floor": self._ds_i16(d["metro_floor"]),
+            "population": self._ds_i32(d["primary_family_ledger_total"]),
+            "gates": {
+                "security": bool(self._ds_u8(d["security_placed"])),
+                "office": bool(self._ds_u8(d["office_placed"])),
+                "recycling": bool(self._ds_u8(d["recycling_ok"])),
+                "route": bool(self._ds_u8(d["route_viable"])),
+            },
+        }
 
-        print(
-            f"TICK day={day_counter} tick={day_tick} daypart={daypart} "
-            f"stars={stars} cash=${cash:,} cal_phase={cal_phase} "
-            f"metro={metro} pop={pop}"
-        )
-
-        # Gate flags
-        flags = []
-        if self._ds_u8(d["security_placed"]):
-            flags.append("sec")
-        if self._ds_u8(d["office_placed"]):
-            flags.append("ofc")
-        if self._ds_u8(d["recycling_ok"]):
-            flags.append("rec")
-        if self._ds_u8(d["route_viable"]):
-            flags.append("rte")
-        if flags:
-            print(f"  gates: {' '.join(flags)}")
-
-        # Sim table summary
         if not show_sims:
-            return
+            return state
+
         sim_base = self._resolve_sim_table_base()
         sim_count = self._ds_i32(d["sim_count"])
         if sim_base is None or sim_count <= 0:
-            return
+            state["sims"] = {}
+            return state
 
         family_counts: dict[int, int] = defaultdict(int)
         family_stress: dict[int, list[int]] = defaultdict(list)
         state_hist: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
 
-        count = min(sim_count, 4096)  # safety cap
+        count = min(sim_count, 4096)
         for i in range(count):
             rec = self._read_sim_record(sim_base, i)
             fam = rec["family"]
             if fam == 0 and rec["state"] == 0:
-                continue  # skip empty slots
+                continue
             family_counts[fam] += 1
             if rec["stress"] > 0:
                 family_stress[fam].append(rec["stress"])
             state_hist[fam][rec["state"]] += 1
 
-        if not family_counts:
+        sims: dict[str, dict] = {}
+        for fam in sorted(family_counts):
+            label = FAMILY_NAMES.get(fam, f"0x{fam:02x}")
+            stresses = family_stress.get(fam, [])
+            states = state_hist[fam]
+            sims[label] = {
+                "count": family_counts[fam],
+                "stress_avg": sum(stresses) // len(stresses) if stresses else 0,
+                "stress_min": min(stresses) if stresses else 0,
+                "stress_max": max(stresses) if stresses else 0,
+                "states": {s: c for s, c in states.items()},
+            }
+        state["sims"] = sims
+        state["sim_allocated"] = sim_count
+        return state
+
+    def dump_tick_state(self, show_sims: bool | None = None) -> None:
+        """Print a summary of the current simulation state."""
+        if show_sims is None:
+            show_sims = self._show_sims
+
+        state = self._collect_tick_state(show_sims)
+
+        if self._output_json:
+            print(json.dumps(state), flush=True)
+            return
+
+        d = state
+        print(
+            f"TICK day={d['day']} tick={d['tick']} daypart={d['daypart']} "
+            f"stars={d['stars']} cash=${d['cash']:,} cal_phase={d['calendar_phase']} "
+            f"metro={d['metro_floor']} pop={d['population']}"
+        )
+
+        gates = d["gates"]
+        flags = []
+        if gates["security"]:
+            flags.append("sec")
+        if gates["office"]:
+            flags.append("ofc")
+        if gates["recycling"]:
+            flags.append("rec")
+        if gates["route"]:
+            flags.append("rte")
+        if flags:
+            print(f"  gates: {' '.join(flags)}")
+
+        if not show_sims:
+            return
+        sims = d.get("sims", {})
+        if not sims:
             print("  (no active sims)")
             return
 
-        print(f"  sims: {sum(family_counts.values())} active ({sim_count} allocated)")
-        for fam in sorted(family_counts):
-            label = FAMILY_NAMES.get(fam, f"0x{fam:02x}")
-            n = family_counts[fam]
-            stresses = family_stress.get(fam, [])
-            avg_stress = sum(stresses) // len(stresses) if stresses else 0
-            min_stress = min(stresses) if stresses else 0
-            max_stress = max(stresses) if stresses else 0
-            states = state_hist[fam]
+        total_active = sum(s["count"] for s in sims.values())
+        print(f"  sims: {total_active} active ({d.get('sim_allocated', '?')} allocated)")
+        for label, s in sims.items():
+            n = s["count"]
+            stresses = s
+            states = s["states"]
             top_states = sorted(states.items(), key=lambda x: -x[1])[:5]
             st_str = " ".join(
-                f"{SIM_STATE_NAMES.get(s, f'0x{s:02x}')}:{c}" for s, c in top_states
+                f"{SIM_STATE_NAMES.get(st, f'0x{st:02x}')}:{c}" for st, c in top_states
             )
-            stress_str = (
-                f"stress={avg_stress:4d} [{min_stress}-{max_stress}]"
-                if stresses
-                else "stress=   -"
-            )
+            if stresses["stress_max"] > 0:
+                stress_str = (
+                    f"stress={stresses['stress_avg']:4d} "
+                    f"[{stresses['stress_min']}-{stresses['stress_max']}]"
+                )
+            else:
+                stress_str = "stress=   -"
             print(f"  {label:14s} n={n:4d}  {stress_str}  [{st_str}]")
 
     def _on_scheduler_entry(self, mu: Uc, address: int, size: int, _user_data) -> None:
@@ -1394,6 +1434,95 @@ class SimTowerEmulator:
         )
 
 
+def _apply_build_json(emu: SimTowerEmulator, path: str) -> None:
+    """Load a build-JSON file and store the build plan on the emulator.
+
+    JSON format:
+    {
+        "floor_extent": {"left": 100, "right": 200},
+        "facilities": [
+            {"type": "office", "floor": 1, "left": 100, "right": 109},
+            {"type": "stairs", "floor": 1, "left": 100},
+            ...
+        ]
+    }
+
+    Supported facility types: any FAMILY_NAMES value (e.g. "office", "single",
+    "condo", "retail", "security", "restaurant", ...) plus "lobby" and "stairs".
+    """
+    with open(path) as f:
+        spec = json.load(f)
+    emu._build_spec = spec
+
+
+# Reverse lookup: name -> type code
+_NAME_TO_TYPE: dict[str, int] = {v: k for k, v in FAMILY_NAMES.items()}
+_NAME_TO_TYPE["lobby"] = 0x18
+
+
+def _apply_default_build(emu: SimTowerEmulator) -> None:
+    """Set the hardcoded default build plan (the old --mode=build behavior)."""
+    emu._build_spec = {
+        "floor_extent": {"left": 100, "right": 200},
+        "facilities": [
+            {"type": "office", "floor": 1, "left": 100, "right": 109},
+            {"type": "office", "floor": 1, "left": 109, "right": 118},
+            {"type": "office", "floor": 2, "left": 100, "right": 109},
+            {"type": "office", "floor": 2, "left": 109, "right": 118},
+            {"type": "stairs", "floor": 1, "left": 100},
+            {"type": "stairs", "floor": 2, "left": 100},
+        ],
+    }
+
+
+def _place_build_objects(emu: SimTowerEmulator) -> None:
+    """Execute the build plan stored on the emulator by _apply_build_json or
+    _apply_default_build."""
+    spec = getattr(emu, "_build_spec", None)
+    if spec is None:
+        return
+
+    extent = spec.get("floor_extent", {"left": 100, "right": 200})
+    ext_l, ext_r = extent["left"], extent["right"]
+
+    # Write lobby and set up support spans
+    emu.write_floor_object_direct(0, type_code=0x18, left_tile=ext_l, right_tile=ext_r)
+
+    # Determine max floor needed for support setup
+    max_floor = 0
+    for fac in spec.get("facilities", []):
+        fl = fac.get("floor", 0)
+        if fl > max_floor:
+            max_floor = fl
+    for fl in range(1, max_floor + 2):
+        emu.setup_floor_support(fl, left_tile=ext_l, right_tile=ext_r)
+
+    # Place each facility
+    for fac in spec.get("facilities", []):
+        ftype = fac["type"]
+        floor = fac.get("floor", 0)
+
+        if ftype == "stairs":
+            emu.build_stairs(top_floor_logical=floor, left_tile=fac["left"])
+        elif ftype == "lobby":
+            emu.write_floor_object_direct(
+                floor, type_code=0x18, left_tile=fac["left"], right_tile=fac["right"]
+            )
+        else:
+            type_code = _NAME_TO_TYPE.get(ftype)
+            if type_code is None:
+                log.warning("Unknown facility type %r, skipping", ftype)
+                continue
+            emu.build_object(
+                type_code=type_code,
+                floor_logical=floor,
+                left_tile=fac["left"],
+                right_tile=fac["right"],
+                variant=fac.get("variant", 0),
+                aux=fac.get("aux", 0),
+            )
+
+
 def main() -> None:
     import argparse
 
@@ -1405,6 +1534,10 @@ def main() -> None:
     parser.add_argument("--max-insns", type=int, default=100_000_000)
     parser.add_argument("--sims", action="store_true",
                         help="show per-family sim state/stress each tick dump")
+    parser.add_argument("--output", choices=["text", "json"], default="text",
+                        help="output format: text (default) or json (JSONL)")
+    parser.add_argument("--build-json", type=str, default=None,
+                        help="path to JSON file describing tower to build")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1413,38 +1546,33 @@ def main() -> None:
 
     emu = SimTowerEmulator(args.exe)
     emu._show_sims = args.sims
+    emu._output_json = args.output == "json"
     emu._install_scheduler_hook(dump_interval=args.dump_interval)
-    print(f"Initial registers: {emu.dump_regs()}")
+    if not emu._output_json:
+        print(f"Initial registers: {emu.dump_regs()}")
 
-    if args.mode == "build":
-        print("\n=== Phase 1: Run through initialization ===")
+    if args.build_json:
+        _apply_build_json(emu, args.build_json)
+    elif args.mode == "build":
+        _apply_default_build(emu)
+
+    if args.mode == "build" or args.build_json:
+        if not emu._output_json:
+            print("\n=== Phase 1: Run through initialization ===")
         try:
             emu.run(max_instructions=20_000_000)
         except RuntimeError as e:
-            print(f"Init stopped: {e}")
+            if not emu._output_json:
+                print(f"Init stopped: {e}")
 
-        print("\n=== Phase 1 complete (ticks=%d) ===" % emu._tick_hook_count)
+        if not emu._output_json:
+            print("\n=== Phase 1 complete (ticks=%d) ===" % emu._tick_hook_count)
         emu.dump_tick_state()
 
-        # Bootstrap a lobby on floor 1 (floor_id 10, logical 0) using direct
-        # write — lobby uses drag placer in the binary, so we bypass it.
-        emu.write_floor_object_direct(0, type_code=0x18, left_tile=100, right_tile=200)
+        _place_build_objects(emu)
 
-        # Set up support spans for above-grade floors
-        for fl in range(1, 4):
-            emu.setup_floor_support(fl, left_tile=100, right_tile=200)
-
-        # Place offices (width 9) on floors 2 and 3 (logical 1 and 2)
-        for fl in (1, 2):
-            emu.build_object(type_code=7, floor_logical=fl, left_tile=100, right_tile=109)
-            emu.build_object(type_code=7, floor_logical=fl, left_tile=109, right_tile=118)
-
-        # Place stairs connecting floor 1→2 and 2→3 (logical 0→1 and 1→2)
-        # Stairs need 8-tile footprint overlapping existing objects
-        emu.build_stairs(top_floor_logical=1, left_tile=100)
-        emu.build_stairs(top_floor_logical=2, left_tile=100)
-
-        print("\n=== Phase 3: Continue simulation ===")
+        if not emu._output_json:
+            print("\n=== Phase 3: Continue simulation ===")
         emu.dump_tick_state()
         try:
             emu.run(max_instructions=args.max_insns)
@@ -1456,10 +1584,12 @@ def main() -> None:
         except RuntimeError as e:
             print(f"Stopped: {e}")
 
-    print(f"\nFinal registers: {emu.dump_regs()}")
-    print(f"Scheduler entered {emu._tick_hook_count} times")
+    if not emu._output_json:
+        print(f"\nFinal registers: {emu.dump_regs()}")
+        print(f"Scheduler entered {emu._tick_hook_count} times")
     if emu._tick_hook_count > 0:
-        print("\n--- Final state ---")
+        if not emu._output_json:
+            print("\n--- Final state ---")
         emu.dump_tick_state(show_sims=True)
 
 
