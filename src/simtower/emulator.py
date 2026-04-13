@@ -74,6 +74,7 @@ from simtower.stubs import StubDef, build_stub_lookup
 
 log = logging.getLogger(__name__)
 
+
 class SimTowerEmulator:
     """Load and emulate SIMTOWER.EX_ (NE 16-bit) in Unicorn.
 
@@ -926,11 +927,19 @@ class SimTowerEmulator:
         family_stress: dict[int, list[int]] = defaultdict(list)
         state_hist: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
 
+        n_initialized = 0
+        n_uninitialized = 0
         count = min(sim_count, 4096)
         for i in range(count):
             rec = self._read_sim_record(sim_base, i)
             fam = rec["family"]
             if fam == 0 and rec["state"] == 0:
+                continue
+            if fam & 0xF0 == 0xF0:
+                n_uninitialized += 1
+                continue  # pending-rebuild sentinel
+            n_initialized += 1
+            if fam not in FAMILY_NAMES:
                 continue
             family_counts[fam] += 1
             if rec["stress"] > 0:
@@ -951,6 +960,8 @@ class SimTowerEmulator:
             }
         state["sims"] = sims
         state["sim_allocated"] = sim_count
+        state["sim_initialized"] = n_initialized
+        state["sim_uninitialized"] = n_uninitialized
         return state
 
     def dump_tick_state(self, show_sims: bool | None = None) -> None:
@@ -992,7 +1003,11 @@ class SimTowerEmulator:
             return
 
         total_active = sum(s["count"] for s in sims.values())
-        print(f"  sims: {total_active} active ({d.get('sim_allocated', '?')} allocated)")
+        n_init = d.get("sim_initialized", "?")
+        n_uninit = d.get("sim_uninitialized", "?")
+        print(
+            f"  sims: {total_active} active ({d.get('sim_allocated', '?')} allocated, {n_init} init, {n_uninit} uninit)"
+        )
         for label, s in sims.items():
             n = s["count"]
             stresses = s
@@ -1015,27 +1030,59 @@ class SimTowerEmulator:
         if address != self._scheduler_linear:
             return
         self._tick_hook_count += 1
-        if self._tick_hook_count == 1:
-            pass  # First scheduler tick — init is complete.
-        # Dump every N ticks (skip the very first call — state not yet initialized)
-        if (
-            self._tick_hook_count > 1
-            and (self._tick_hook_count - 1) % self._tick_dump_interval == 0
-        ):
+        if (self._tick_hook_count - 1) % self._tick_dump_interval == 0:
             self.dump_tick_state()
+        # Stop after max_ticks scheduler entries if configured
+        if self._max_ticks and self._tick_hook_count >= self._max_ticks:
+            mu.emu_stop()
 
-    def _install_scheduler_hook(self, dump_interval: int = 100) -> None:
-        """Register a code hook on the scheduler function for periodic state dumps."""
+    def _resolve_scheduler_linear(self) -> int | None:
+        """Resolve the linear address of the scheduler function entry point."""
         seg_base = self.seg_bases.get(SCHEDULER_NE_SEG)
         if seg_base is None:
             log.warning(
-                "Cannot install scheduler hook: segment %d not loaded", SCHEDULER_NE_SEG
+                "Cannot resolve scheduler address: segment %d not loaded",
+                SCHEDULER_NE_SEG,
             )
+            return None
+        return seg_base + SCHEDULER_SEG_OFFSET
+
+    def _on_scheduler_stop(self, mu: Uc, address: int, size: int, _user_data) -> None:
+        """One-shot hook: stop emulation on first scheduler entry."""
+        if address != self._scheduler_linear:
             return
-        self._scheduler_linear = seg_base + SCHEDULER_SEG_OFFSET
+        mu.emu_stop()
+
+    def wait_for_scheduler(self) -> None:
+        """Run until the scheduler function is first entered, then stop."""
+        addr = self._resolve_scheduler_linear()
+        if addr is None:
+            return
+        self._scheduler_linear = addr
+        hook_id = self.mu.hook_add(
+            UC_HOOK_CODE,
+            self._on_scheduler_stop,
+            begin=self._scheduler_linear,
+            end=self._scheduler_linear + 1,
+        )
+        log.info("Waiting for scheduler at linear 0x%06X", self._scheduler_linear)
+        try:
+            self.run(max_instructions=20_000_000)
+        except RuntimeError:
+            pass
+        self.mu.hook_del(hook_id)
+
+    def _install_scheduler_hook(
+        self, dump_interval: int = 100, max_ticks: int = 0
+    ) -> None:
+        """Register a code hook on the scheduler function for periodic state dumps."""
+        addr = self._resolve_scheduler_linear()
+        if addr is None:
+            return
+        self._scheduler_linear = addr
         self._tick_hook_count = 0
         self._tick_dump_interval = dump_interval
-        # Hook just the first instruction of the scheduler function
+        self._max_ticks = max_ticks
         self.mu.hook_add(
             UC_HOOK_CODE,
             self._on_scheduler_entry,
@@ -1466,11 +1513,12 @@ def _apply_build_json(emu: SimTowerEmulator, path: str) -> None:
     with open(path) as f:
         spec = json.load(f)
     emu._build_spec = spec
+    emu._build_config = spec.get("config", {})
 
 
 # Reverse lookup: name -> type code
 _NAME_TO_TYPE: dict[str, int] = {v: k for k, v in FAMILY_NAMES.items()}
-_NAME_TO_TYPE["lobby"] = 0x18
+_NAME_TO_TYPE["lobby"] = 0x0B
 
 
 def _resolve_type_code(name: str) -> int | None:
@@ -1531,60 +1579,103 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
 
     # Write lobby on floor 0
     lobby_l, lobby_r = floor_extents.get(0, (100, 200))
-    emu.write_floor_object_direct(0, type_code=0x18, left_tile=lobby_l, right_tile=lobby_r)
+    emu.write_floor_object_direct(
+        0, type_code=0x0B, left_tile=lobby_l, right_tile=lobby_r
+    )
 
-    # Determine max floor needed from facilities and extents
-    max_floor = max((f.get("floor", 0) for f in spec.get("facilities", [])), default=0)
-    max_floor = max(max_floor, max(floor_extents.keys(), default=0))
+    # Group facilities by floor; separate stairs
+    facilities = spec.get("facilities", [])
+    by_floor: dict[int, list[dict]] = {}
+    stairs_list: list[dict] = []
+    for fac in facilities:
+        if fac["type"] == "stairs":
+            stairs_list.append(fac)
+        else:
+            fl = fac.get("floor", 0)
+            by_floor.setdefault(fl, []).append(fac)
 
-    # Set up per-floor support spans, widening to cover any explicit extent
+    # Determine all above-grade floors that need support
+    all_floors = set(by_floor.keys()) | {f.get("floor", 0) for f in stairs_list}
+    all_floors |= set(floor_extents.keys())
+
+    # Place facilities floor-by-floor, bottom-up.
+    # Before placing on floor N (above grade), ensure floor N-1 has support.
+    # setup_floor_support writes a phantom record into floor N-1's blob, so we
+    # must call it AFTER placing real objects on floor N-1.
     running_l, running_r = lobby_l, lobby_r
-    for fl in range(1, max_floor + 2):
+    for fl in sorted(all_floors):
+        if fl <= 0:
+            continue
+        # Widen running extent if this floor has an explicit extent
         if fl in floor_extents:
             fl_l, fl_r = floor_extents[fl]
             running_l = min(running_l, fl_l)
             running_r = max(running_r, fl_r)
         emu.setup_floor_support(fl, left_tile=running_l, right_tile=running_r)
 
-    # Place each facility
-    for fac in spec.get("facilities", []):
-        ftype = fac["type"]
-        floor = fac.get("floor", 0)
-
-        if ftype == "stairs":
-            emu.build_stairs(top_floor_logical=floor, left_tile=fac["left"])
-            continue
-
-        type_code = _resolve_type_code(ftype)
-        if type_code is None:
-            log.warning("Unknown facility type %r, skipping", ftype)
-            continue
-
-        if ftype == "lobby":
+        # Place non-stairs facilities on this floor
+        for fac in by_floor.get(fl, []):
+            ftype = fac["type"]
+            type_code = _resolve_type_code(ftype)
+            if type_code is None:
+                log.warning("Unknown facility type %r, skipping", ftype)
+                continue
+            if ftype == "lobby":
+                right = _resolve_right(fac, type_code)
+                if right is None:
+                    log.warning("Cannot determine width for lobby, skipping")
+                    continue
+                emu.write_floor_object_direct(
+                    fl, type_code=0x0B, left_tile=fac["left"], right_tile=right
+                )
+                continue
             right = _resolve_right(fac, type_code)
             if right is None:
-                log.warning("Cannot determine width for lobby, skipping")
+                log.warning(
+                    "No known width for type %r (0x%02x) and no 'right' given, skipping",
+                    ftype,
+                    type_code,
+                )
                 continue
-            emu.write_floor_object_direct(
-                floor, type_code=0x18, left_tile=fac["left"], right_tile=right
+            emu.build_object(
+                type_code=type_code,
+                floor_logical=fl,
+                left_tile=fac["left"],
+                right_tile=right,
+                variant=fac.get("variant", 0),
+                aux=fac.get("aux", 0),
             )
-            continue
 
-        right = _resolve_right(fac, type_code)
-        if right is None:
-            log.warning(
-                "No known width for type %r (0x%02x) and no 'right' given, skipping",
-                ftype, type_code,
-            )
+    # Place below-grade facilities (no support needed)
+    for fl in sorted(by_floor.keys()):
+        if fl >= 0:
             continue
-        emu.build_object(
-            type_code=type_code,
-            floor_logical=floor,
-            left_tile=fac["left"],
-            right_tile=right,
-            variant=fac.get("variant", 0),
-            aux=fac.get("aux", 0),
-        )
+        for fac in by_floor[fl]:
+            ftype = fac["type"]
+            type_code = _resolve_type_code(ftype)
+            if type_code is None:
+                log.warning("Unknown facility type %r, skipping", ftype)
+                continue
+            right = _resolve_right(fac, type_code)
+            if right is None:
+                log.warning(
+                    "No known width for type %r (0x%02x) and no 'right' given, skipping",
+                    ftype,
+                    type_code,
+                )
+                continue
+            emu.build_object(
+                type_code=type_code,
+                floor_logical=fl,
+                left_tile=fac["left"],
+                right_tile=right,
+                variant=fac.get("variant", 0),
+                aux=fac.get("aux", 0),
+            )
+
+    # Place stairs last, bottom-up (need objects on both landing floors)
+    for fac in sorted(stairs_list, key=lambda f: f.get("floor", 0)):
+        emu.build_stairs(top_floor_logical=fac.get("floor", 0), left_tile=fac["left"])
 
 
 def main() -> None:
@@ -1593,15 +1684,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="SimTower NE emulator")
     parser.add_argument("exe", nargs="?", default="src/simtower/SIMTOWER.EXE")
     parser.add_argument("--mode", choices=["run", "build"], default="run")
-    parser.add_argument("--dump-interval", type=int, default=100,
-                        help="dump state every N scheduler ticks")
+    parser.add_argument(
+        "--dump-interval",
+        type=int,
+        default=100,
+        help="dump state every N scheduler ticks",
+    )
     parser.add_argument("--max-insns", type=int, default=100_000_000)
-    parser.add_argument("--sims", action="store_true",
-                        help="show per-family sim state/stress each tick dump")
-    parser.add_argument("--output", choices=["text", "json"], default="text",
-                        help="output format: text (default) or json (JSONL)")
-    parser.add_argument("--build-json", type=str, default=None,
-                        help="path to JSON file describing tower to build")
+    parser.add_argument(
+        "--sims",
+        action="store_true",
+        help="show per-family sim state/stress each tick dump",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["text", "json"],
+        default="text",
+        help="output format: text (default) or json (JSONL)",
+    )
+    parser.add_argument(
+        "--build-json",
+        type=str,
+        default=None,
+        help="path to JSON file describing tower to build",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -1611,38 +1717,35 @@ def main() -> None:
     emu = SimTowerEmulator(args.exe)
     emu._show_sims = args.sims
     emu._output_json = args.output == "json"
-    emu._install_scheduler_hook(dump_interval=args.dump_interval)
-    if not emu._output_json:
-        print(f"Initial registers: {emu.dump_regs()}")
 
     if args.build_json:
         _apply_build_json(emu, args.build_json)
     elif args.mode == "build":
         _apply_default_build(emu)
 
+    # Build-JSON config overrides CLI args
+    cfg = getattr(emu, "_build_config", {})
+    dump_interval = cfg.get("dump_interval", args.dump_interval)
+    max_insns = cfg.get("max_instructions", args.max_insns)
+    max_ticks = cfg.get("max_ticks", 0)
+
     if args.mode == "build" or args.build_json:
+        # Phase 1: run binary init, stop when the scheduler is first entered.
+        emu.wait_for_scheduler()
+
+        # Phase 2: place facilities, then install the dump hook and resume.
+        _place_build_objects(emu)
+        emu._install_scheduler_hook(dump_interval=dump_interval, max_ticks=max_ticks)
+
         if not emu._output_json:
-            print("\n=== Phase 1: Run through initialization ===")
+            print("\n=== Running simulation ===")
         try:
-            emu.run(max_instructions=20_000_000)
+            emu.run(max_instructions=max_insns)
         except RuntimeError as e:
             if not emu._output_json:
-                print(f"Init stopped: {e}")
-
-        if not emu._output_json:
-            print("\n=== Phase 1 complete (ticks=%d) ===" % emu._tick_hook_count)
-        emu.dump_tick_state()
-
-        _place_build_objects(emu)
-
-        if not emu._output_json:
-            print("\n=== Phase 3: Continue simulation ===")
-        emu.dump_tick_state()
-        try:
-            emu.run(max_instructions=args.max_insns)
-        except RuntimeError as e:
-            print(f"Stopped: {e}")
+                print(f"Stopped: {e}")
     else:
+        emu._install_scheduler_hook(dump_interval=args.dump_interval)
         try:
             emu.run(max_instructions=args.max_insns)
         except RuntimeError as e:
