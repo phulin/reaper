@@ -30,13 +30,13 @@ from unicorn.x86_const import (
     UC_X86_REG_DI,
     UC_X86_REG_DS,
     UC_X86_REG_DX,
+    UC_X86_REG_EFLAGS,
     UC_X86_REG_EIP,
     UC_X86_REG_ES,
     UC_X86_REG_GDTR,
     UC_X86_REG_SI,
     UC_X86_REG_SP,
     UC_X86_REG_SS,
-    UC_X86_REG_EFLAGS,
 )
 
 from simtower.ne_loader import (
@@ -52,12 +52,13 @@ log = logging.getLogger(__name__)
 
 # ── Memory layout ────────────────────────────────────────────────────
 MEM_SIZE = 16 * 1024 * 1024  # 16 MiB address space
-GDT_ADDR = 0x1000            # linear address of GDT
-GDT_LIMIT = 0x10000          # 64 KiB = room for 8192 descriptors
-LOAD_BASE = 0x10_0000        # 1 MiB: linear base for NE segments
-STUB_BASE = 0x80_0000        # 8 MiB: linear base for API stub thunks
-HEAP_BASE = 0xA0_0000        # 10 MiB: linear base for GlobalAlloc heap
-FIRST_SELECTOR = 0x08        # first usable GDT selector (skip null)
+GDT_ADDR = 0x1000  # linear address of GDT
+GDT_LIMIT = 0x10000  # 64 KiB = room for 8192 descriptors
+LOAD_BASE = 0x10_0000  # 1 MiB: linear base for NE segments
+STUB_BASE = 0x80_0000  # 8 MiB: linear base for API stub thunks
+HEAP_BASE = 0xA0_0000  # 10 MiB: linear base for GlobalAlloc heap
+CALL_TRAP_BASE = 0x9F_0000  # just below heap: return-trap for call_far_pascal
+FIRST_SELECTOR = 0x08  # first usable GDT selector (skip null)
 
 # ── Ghidra ↔ emulator address mapping ───────────────────────────────
 # Ghidra maps NE segment N to 0x10000000 + (N-1) * 0x80000.
@@ -67,25 +68,26 @@ GHIDRA_SEG_STRIDE = 0x8_0000
 
 # DS-relative offsets for key globals (Ghidra addr − 0x12880000)
 DS_OFF = {
-    "day_tick":          0xBC52,  # uint16
-    "day_counter":       0xBC54,  # int32
-    "daypart_index":     0xBB8B,  # uint8
-    "calendar_phase":    0xBB8A,  # uint8
-    "star_count":        0xBC40,  # uint16
-    "cash_balance":      0xBC42,  # int32
+    "day_tick": 0xBC52,  # uint16
+    "day_counter": 0xBC54,  # int32
+    "daypart_index": 0xBB8B,  # uint8
+    "calendar_phase": 0xBB8A,  # uint8
+    "star_count": 0xBC40,  # uint16
+    "cash_balance": 0xBC42,  # int32
     "progress_override": 0xBC58,  # uint16
-    "metro_floor":       0xBC5C,  # int16 (-1 = none)
-    "eval_entity_idx":   0xBC60,  # int16
-    "recycling_count":   0xBC68,  # uint16
-    "security_count":    0xBC6E,  # uint16
-    "ent_link_count":    0xBC74,  # uint16
-    "sim_table_ptr":     0xC04E,  # uint16  (near ptr / selector)
-    "sim_count":         0xC052,  # int32
-    "floor_tables_ptr":  0xC022,  # start of far-pointer array (120 × 4 bytes)
-    "security_placed":   0xC19E,  # uint8
-    "office_placed":     0xC19F,  # uint8
-    "recycling_ok":      0xC1A0,  # uint8
-    "route_viable":      0xC1A1,  # uint8
+    "metro_floor": 0xBC5C,  # int16 (-1 = none)
+    "eval_entity_idx": 0xBC60,  # int16
+    "recycling_count": 0xBC68,  # uint16
+    "security_count": 0xBC6E,  # uint16
+    "ent_link_count": 0xBC74,  # uint16
+    "sim_table_ptr": 0xC04E,  # uint16  (near ptr / selector)
+    "sim_count": 0xC052,  # int32
+    "floor_tables_ptr": 0xBE6E,  # start of far-pointer array (120 × 4-byte far ptrs)
+    # interleaved with support table at 0xBE6A
+    "security_placed": 0xC19E,  # uint8
+    "office_placed": 0xC19F,  # uint8
+    "recycling_ok": 0xC1A0,  # uint8
+    "route_viable": 0xC1A1,  # uint8
 }
 
 # run_simulation_day_scheduler lives in NE segment 66 at offset 0x0196.
@@ -98,12 +100,33 @@ SIM_REC_SIZE = 16
 # Placed-object record stride: 0x12 bytes per slot inside floor blob
 OBJ_STRIDE = 0x12
 
+# place_object_on_floor: Ghidra 0x12001847 = NE segment 65, offset 0x1847
+PLACE_OBJ_NE_SEG = 65
+PLACE_OBJ_OFFSET = 0x1847
+
+# place_mergeable_span_object_on_floor: Ghidra 0x1200293e = NE seg 65, offset 0x293e
+PLACE_SPAN_NE_SEG = 65
+PLACE_SPAN_OFFSET = 0x293E
+
+# dispatch_drag_span_placement (for lobby/floor spans): Ghidra 0x120027ce = seg 65, offset 0x27ce
+DRAG_SPAN_NE_SEG = 65
+DRAG_SPAN_OFFSET = 0x27CE
+
 # Family code → human label (most common families)
 FAMILY_NAMES: dict[int, str] = {
-    3: "single", 4: "twin", 5: "suite", 6: "retail", 7: "office",
-    9: "condo", 10: "fast-food", 0xC: "restaurant", 0xE: "security",
-    0xF: "housekeeping", 0x12: "entertainment", 0x1D: "cinema",
-    0x21: "cathedral", 0x24: "eval",
+    3: "single",
+    4: "twin",
+    5: "suite",
+    6: "retail",
+    7: "office",
+    9: "condo",
+    10: "fast-food",
+    0xC: "restaurant",
+    0xE: "security",
+    0xF: "housekeeping",
+    0x12: "entertainment",
+    0x1D: "cinema",
+    0x21: "cathedral",
 }
 
 # Type alias for stub handler functions
@@ -130,13 +153,15 @@ def _gdt_entry(base: int, limit: int, access: int, flags_hi: int) -> bytes:
 
 # ── Heap allocation tracking ─────────────────────────────────────────
 
+
 @dataclass
 class HeapBlock:
     """Metadata for a GlobalAlloc'd block."""
-    handle: int      # the selector (== handle in Win16)
-    linear: int      # linear address in Unicorn memory
-    size: int        # allocation size in bytes
-    selector: int    # GDT selector for this block
+
+    handle: int  # the selector (== handle in Win16)
+    linear: int  # linear address in Unicorn memory
+    size: int  # allocation size in bytes
+    selector: int  # GDT selector for this block
     lock_count: int = 0
     flags: int = 0
 
@@ -181,8 +206,12 @@ class GlobalHeap:
         sel = emu._alloc_selector(linear, max(size - 1, 0), code=False)
 
         block = HeapBlock(
-            handle=sel, linear=linear, size=size,
-            selector=sel, lock_count=0, flags=flags,
+            handle=sel,
+            linear=linear,
+            size=size,
+            selector=sel,
+            lock_count=0,
+            flags=flags,
         )
         self.blocks[sel] = block
         return sel
@@ -231,7 +260,9 @@ class GlobalHeap:
             return sel
         return 0
 
-    def realloc(self, handle: int, new_size: int, flags: int, emu: SimTowerEmulator) -> int:
+    def realloc(
+        self, handle: int, new_size: int, flags: int, emu: SimTowerEmulator
+    ) -> int:
         """Reallocate a block. Returns new handle, or 0 on failure."""
         block = self.blocks.get(handle)
         if block is None:
@@ -273,6 +304,7 @@ class GlobalHeap:
 #   ...
 #   [SS:SP+4+N-size_of_first] = first param (leftmost)
 
+
 def _read_stack_word(emu: SimTowerEmulator, offset: int) -> int:
     """Read a WORD from the stack at SS:SP+offset."""
     ss = emu.mu.reg_read(UC_X86_REG_SS)
@@ -301,7 +333,12 @@ def _handle_global_alloc(emu: SimTowerEmulator, stub: StubDef) -> None:
     dw_bytes = _read_stack_dword(emu, 4)
     fu_flags = _read_stack_word(emu, 8)
     handle = emu.heap.alloc(dw_bytes, fu_flags, emu)
-    log.debug("GlobalAlloc(flags=0x%04X, size=%d) -> handle=0x%04X", fu_flags, dw_bytes, handle)
+    log.debug(
+        "GlobalAlloc(flags=0x%04X, size=%d) -> handle=0x%04X",
+        fu_flags,
+        dw_bytes,
+        handle,
+    )
     emu.mu.reg_write(UC_X86_REG_AX, handle)
 
 
@@ -317,7 +354,13 @@ def _handle_global_realloc(emu: SimTowerEmulator, stub: StubDef) -> None:
     dw_bytes = _read_stack_dword(emu, 6)
     h_mem = _read_stack_word(emu, 10)
     handle = emu.heap.realloc(h_mem, dw_bytes, fu_flags, emu)
-    log.debug("GlobalReAlloc(h=0x%04X, size=%d, flags=0x%04X) -> 0x%04X", h_mem, dw_bytes, fu_flags, handle)
+    log.debug(
+        "GlobalReAlloc(h=0x%04X, size=%d, flags=0x%04X) -> 0x%04X",
+        h_mem,
+        dw_bytes,
+        fu_flags,
+        handle,
+    )
     emu.mu.reg_write(UC_X86_REG_AX, handle)
 
 
@@ -494,29 +537,29 @@ def _handle_get_device_caps(emu: SimTowerEmulator, stub: StubDef) -> None:
     n_index = _read_stack_word(emu, 4)
     # Win16 device cap indices (different from Win32!)
     caps = {
-        0: 1,       # DRIVERVERSION
-        2: 1,       # TECHNOLOGY (DT_RASDISPLAY)
-        4: 320,     # HORZSIZE (mm)
-        6: 240,     # VERTSIZE (mm)
-        8: 640,     # HORZRES (pixels)
-        10: 480,    # VERTRES (pixels)
-        12: 8,      # BITSPIXEL
-        14: 1,      # PLANES
-        16: 64,     # NUMBRUSHES
-        18: 16,     # NUMPENS
-        22: 128,    # NUMFONTS
-        24: 256,    # NUMCOLORS
-        34: 0x6001, # TEXTCAPS
-        36: 36,     # CLIPCAPS
-        38: 0x7E99, # RASTERCAPS
-        40: 36,     # ASPECTX
-        42: 36,     # ASPECTY
-        44: 51,     # ASPECTXY
-        88: 96,     # LOGPIXELSX
-        90: 96,     # LOGPIXELSY
-        104: 256,   # SIZEPALETTE
-        106: 20,    # NUMRESERVED
-        108: 18,    # COLORRES
+        0: 1,  # DRIVERVERSION
+        2: 1,  # TECHNOLOGY (DT_RASDISPLAY)
+        4: 320,  # HORZSIZE (mm)
+        6: 240,  # VERTSIZE (mm)
+        8: 640,  # HORZRES (pixels)
+        10: 480,  # VERTRES (pixels)
+        12: 8,  # BITSPIXEL
+        14: 1,  # PLANES
+        16: 64,  # NUMBRUSHES
+        18: 16,  # NUMPENS
+        22: 128,  # NUMFONTS
+        24: 256,  # NUMCOLORS
+        34: 0x6001,  # TEXTCAPS
+        36: 36,  # CLIPCAPS
+        38: 0x7E99,  # RASTERCAPS
+        40: 36,  # ASPECTX
+        42: 36,  # ASPECTY
+        44: 51,  # ASPECTXY
+        88: 96,  # LOGPIXELSX
+        90: 96,  # LOGPIXELSY
+        104: 256,  # SIZEPALETTE
+        106: 20,  # NUMRESERVED
+        108: 18,  # COLORRES
     }
     val = caps.get(n_index, 0)
     emu.mu.reg_write(UC_X86_REG_AX, val)
@@ -530,28 +573,28 @@ def _handle_get_system_metrics(emu: SimTowerEmulator, stub: StubDef) -> None:
     """
     n_index = _read_stack_word(emu, 4)
     metrics = {
-        0: 640,   # SM_CXSCREEN
-        1: 480,   # SM_CYSCREEN
-        2: 20,    # SM_CXVSCROLL
-        3: 20,    # SM_CYHSCROLL
-        4: 20,    # SM_CYCAPTION
-        5: 1,     # SM_CXBORDER
-        6: 1,     # SM_CYBORDER
-        7: 4,     # SM_CXDLGFRAME
-        8: 4,     # SM_CYDLGFRAME
-        9: 16,    # SM_CYVTHUMB
-        10: 16,   # SM_CXHTHUMB
-        11: 32,   # SM_CXICON
-        12: 32,   # SM_CYICON
-        13: 32,   # SM_CXCURSOR
-        14: 32,   # SM_CYCURSOR
-        15: 4,    # SM_CXFRAME (SM_CXSIZEFRAME)
-        16: 4,    # SM_CYFRAME
-        20: 20,   # SM_CXHSCROLL
-        21: 20,   # SM_CYVSCROLL
-        23: 1,    # SM_MOUSEPRESENT
+        0: 640,  # SM_CXSCREEN
+        1: 480,  # SM_CYSCREEN
+        2: 20,  # SM_CXVSCROLL
+        3: 20,  # SM_CYHSCROLL
+        4: 20,  # SM_CYCAPTION
+        5: 1,  # SM_CXBORDER
+        6: 1,  # SM_CYBORDER
+        7: 4,  # SM_CXDLGFRAME
+        8: 4,  # SM_CYDLGFRAME
+        9: 16,  # SM_CYVTHUMB
+        10: 16,  # SM_CXHTHUMB
+        11: 32,  # SM_CXICON
+        12: 32,  # SM_CYICON
+        13: 32,  # SM_CXCURSOR
+        14: 32,  # SM_CYCURSOR
+        15: 4,  # SM_CXFRAME (SM_CXSIZEFRAME)
+        16: 4,  # SM_CYFRAME
+        20: 20,  # SM_CXHSCROLL
+        21: 20,  # SM_CYVSCROLL
+        23: 1,  # SM_MOUSEPRESENT
         28: 112,  # SM_CXMIN
-        29: 27,   # SM_CYMIN
+        29: 27,  # SM_CYMIN
     }
     val = metrics.get(n_index, 0)
     emu.mu.reg_write(UC_X86_REG_AX, val)
@@ -696,8 +739,10 @@ def _handle_inflate_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     dy = _read_stack_word(emu, 4)
     dx = _read_stack_word(emu, 6)
     # Sign extend
-    if dy >= 0x8000: dy -= 0x10000
-    if dx >= 0x8000: dx -= 0x10000
+    if dy >= 0x8000:
+        dy -= 0x10000
+    if dx >= 0x8000:
+        dx -= 0x10000
     rc_ptr = _read_stack_dword(emu, 8)
     seg = (rc_ptr >> 16) & 0xFFFF
     off = rc_ptr & 0xFFFF
@@ -721,16 +766,25 @@ def _handle_offset_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     """
     dy = _read_stack_word(emu, 4)
     dx = _read_stack_word(emu, 6)
-    if dy >= 0x8000: dy -= 0x10000
-    if dx >= 0x8000: dx -= 0x10000
+    if dy >= 0x8000:
+        dy -= 0x10000
+    if dx >= 0x8000:
+        dx -= 0x10000
     rc_ptr = _read_stack_dword(emu, 8)
     seg = (rc_ptr >> 16) & 0xFFFF
     off = rc_ptr & 0xFFFF
     base = emu.selector_bases.get(seg, 0)
     left, top, right, bottom = struct.unpack("<hhhh", emu.mu.mem_read(base + off, 8))
-    emu.mu.mem_write(base + off, struct.pack("<HHHH",
-        (left + dx) & 0xFFFF, (top + dy) & 0xFFFF,
-        (right + dx) & 0xFFFF, (bottom + dy) & 0xFFFF))
+    emu.mu.mem_write(
+        base + off,
+        struct.pack(
+            "<HHHH",
+            (left + dx) & 0xFFFF,
+            (top + dy) & 0xFFFF,
+            (right + dx) & 0xFFFF,
+            (bottom + dy) & 0xFFFF,
+        ),
+    )
     emu.mu.reg_write(UC_X86_REG_AX, 1)
 
 
@@ -745,10 +799,12 @@ def _handle_intersect_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     s2_ptr = _read_stack_dword(emu, 4)
     s1_ptr = _read_stack_dword(emu, 8)
     d_ptr = _read_stack_dword(emu, 12)
+
     def read_rect(ptr):
         seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
         base = emu.selector_bases.get(seg, 0)
         return struct.unpack("<hhhh", emu.mu.mem_read(base + off, 8))
+
     l1, t1, r1, b1 = read_rect(s1_ptr)
     l2, t2, r2, b2 = read_rect(s2_ptr)
     il = max(l1, l2)
@@ -758,7 +814,10 @@ def _handle_intersect_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     d_seg, d_off = (d_ptr >> 16) & 0xFFFF, d_ptr & 0xFFFF
     d_base = emu.selector_bases.get(d_seg, 0)
     if il < ir and it < ib:
-        emu.mu.mem_write(d_base + d_off, struct.pack("<HHHH", il & 0xFFFF, it & 0xFFFF, ir & 0xFFFF, ib & 0xFFFF))
+        emu.mu.mem_write(
+            d_base + d_off,
+            struct.pack("<HHHH", il & 0xFFFF, it & 0xFFFF, ir & 0xFFFF, ib & 0xFFFF),
+        )
         emu.mu.reg_write(UC_X86_REG_AX, 1)
     else:
         emu.mu.mem_write(d_base + d_off, struct.pack("<HHHH", 0, 0, 0, 0))
@@ -770,17 +829,26 @@ def _handle_union_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     s2_ptr = _read_stack_dword(emu, 4)
     s1_ptr = _read_stack_dword(emu, 8)
     d_ptr = _read_stack_dword(emu, 12)
+
     def read_rect(ptr):
         seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
         base = emu.selector_bases.get(seg, 0)
         return struct.unpack("<hhhh", emu.mu.mem_read(base + off, 8))
+
     l1, t1, r1, b1 = read_rect(s1_ptr)
     l2, t2, r2, b2 = read_rect(s2_ptr)
     d_seg, d_off = (d_ptr >> 16) & 0xFFFF, d_ptr & 0xFFFF
     d_base = emu.selector_bases.get(d_seg, 0)
-    emu.mu.mem_write(d_base + d_off, struct.pack("<HHHH",
-        min(l1, l2) & 0xFFFF, min(t1, t2) & 0xFFFF,
-        max(r1, r2) & 0xFFFF, max(b1, b2) & 0xFFFF))
+    emu.mu.mem_write(
+        d_base + d_off,
+        struct.pack(
+            "<HHHH",
+            min(l1, l2) & 0xFFFF,
+            min(t1, t2) & 0xFFFF,
+            max(r1, r2) & 0xFFFF,
+            max(b1, b2) & 0xFFFF,
+        ),
+    )
     emu.mu.reg_write(UC_X86_REG_AX, 1)
 
 
@@ -794,8 +862,10 @@ def _handle_pt_in_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     pt = _read_stack_dword(emu, 4)
     px = pt & 0xFFFF
     py = (pt >> 16) & 0xFFFF
-    if px >= 0x8000: px -= 0x10000
-    if py >= 0x8000: py -= 0x10000
+    if px >= 0x8000:
+        px -= 0x10000
+    if py >= 0x8000:
+        py -= 0x10000
     rc_ptr = _read_stack_dword(emu, 8)
     seg, off = (rc_ptr >> 16) & 0xFFFF, rc_ptr & 0xFFFF
     base = emu.selector_bases.get(seg, 0)
@@ -818,10 +888,12 @@ def _handle_equal_rect(emu: SimTowerEmulator, stub: StubDef) -> None:
     """EqualRect(LPRECT lprc1, LPRECT lprc2) -> BOOL."""
     r1_ptr = _read_stack_dword(emu, 4)
     r2_ptr = _read_stack_dword(emu, 8)
+
     def read_rect(ptr):
         seg, off = (ptr >> 16) & 0xFFFF, ptr & 0xFFFF
         base = emu.selector_bases.get(seg, 0)
         return bytes(emu.mu.mem_read(base + off, 8))
+
     emu.mu.reg_write(UC_X86_REG_AX, 1 if read_rect(r1_ptr) == read_rect(r2_ptr) else 0)
 
 
@@ -940,7 +1012,14 @@ def _handle_lstrcpy(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.mem_write(dst_base + dst_off, data)
     emu.mu.reg_write(UC_X86_REG_DX, dst_seg)
     emu.mu.reg_write(UC_X86_REG_AX, dst_off)
-    log.debug("lstrcpy(%04X:%04X <- %04X:%04X, len=%d)", dst_seg, dst_off, src_seg, src_off, len(data) - 1)
+    log.debug(
+        "lstrcpy(%04X:%04X <- %04X:%04X, len=%d)",
+        dst_seg,
+        dst_off,
+        src_seg,
+        src_off,
+        len(data) - 1,
+    )
 
 
 def _handle_lstrcat(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -991,7 +1070,14 @@ def _handle_hmemcpy(emu: SimTowerEmulator, stub: StubDef) -> None:
     if cb > 0 and cb < 0x100000:  # sanity limit
         data = bytes(emu.mu.mem_read(src_base + src_off, cb))
         emu.mu.mem_write(dst_base + dst_off, data)
-    log.debug("hmemcpy(%04X:%04X <- %04X:%04X, %d bytes)", dst_seg, dst_off, src_seg, src_off, cb)
+    log.debug(
+        "hmemcpy(%04X:%04X <- %04X:%04X, %d bytes)",
+        dst_seg,
+        dst_off,
+        src_seg,
+        src_off,
+        cb,
+    )
 
 
 def _handle_find_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -1039,7 +1125,10 @@ def _handle_find_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
         null_pos = data.find(0)
         if null_pos >= 0:
             data = data[:null_pos]
-        log.debug("FindResource: string name '%s' not supported", data.decode("ascii", errors="replace"))
+        log.debug(
+            "FindResource: string name '%s' not supported",
+            data.decode("ascii", errors="replace"),
+        )
         emu.mu.reg_write(UC_X86_REG_AX, 0)
         return
 
@@ -1056,8 +1145,14 @@ def _handle_find_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     # Use a synthetic handle — store the resource entry for later LoadResource
     handle = emu._register_resource(entry)
     emu.mu.reg_write(UC_X86_REG_AX, handle)
-    log.debug("FindResource(type=%s, id=%d) -> handle=0x%04X (offset=0x%X, len=%d)",
-              type_desc, res_id, handle, entry.file_offset, entry.length)
+    log.debug(
+        "FindResource(type=%s, id=%d) -> handle=0x%04X (offset=0x%X, len=%d)",
+        type_desc,
+        res_id,
+        handle,
+        entry.file_offset,
+        entry.length,
+    )
 
 
 def _handle_load_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -1094,8 +1189,12 @@ def _handle_load_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
 
     emu._loaded_resources[h_res] = handle
     emu.mu.reg_write(UC_X86_REG_AX, handle)
-    log.debug("LoadResource(0x%04X) -> heap handle 0x%04X (%d bytes)",
-              h_res, handle, entry.length)
+    log.debug(
+        "LoadResource(0x%04X) -> heap handle 0x%04X (%d bytes)",
+        h_res,
+        handle,
+        entry.length,
+    )
 
 
 def _handle_lock_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -1232,28 +1331,29 @@ def _handle_get_text_metrics(emu: SimTowerEmulator, stub: StubDef) -> None:
     # tmFirstChar(1) tmLastChar(1) tmDefaultChar(1) tmBreakChar(1)
     # tmPitchAndFamily(1) tmCharSet(1) tmOverhang(2)
     # tmDigitizedAspectX(2) tmDigitizedAspectY(2)
-    tm = struct.pack("<hhhhhhhhBBBBBBBBBxhhh",
-        16,   # tmHeight
-        13,   # tmAscent
-        3,    # tmDescent
-        2,    # tmInternalLeading
-        0,    # tmExternalLeading
-        7,    # tmAveCharWidth
-        14,   # tmMaxCharWidth
+    tm = struct.pack(
+        "<hhhhhhhhBBBBBBBBBxhhh",
+        16,  # tmHeight
+        13,  # tmAscent
+        3,  # tmDescent
+        2,  # tmInternalLeading
+        0,  # tmExternalLeading
+        7,  # tmAveCharWidth
+        14,  # tmMaxCharWidth
         400,  # tmWeight (FW_NORMAL)
-        0,    # tmItalic
-        0,    # tmUnderlined
-        0,    # tmStruckOut
-        0x20, # tmFirstChar
-        0xFF, # tmLastChar
-        0x2E, # tmDefaultChar ('.')
-        0x20, # tmBreakChar (' ')
-        0x20, # tmPitchAndFamily (VARIABLE_PITCH | FF_SWISS)
-        0,    # tmCharSet (ANSI_CHARSET)
-                # x = pad byte for alignment
-        0,    # tmOverhang
-        96,   # tmDigitizedAspectX
-        96,   # tmDigitizedAspectY
+        0,  # tmItalic
+        0,  # tmUnderlined
+        0,  # tmStruckOut
+        0x20,  # tmFirstChar
+        0xFF,  # tmLastChar
+        0x2E,  # tmDefaultChar ('.')
+        0x20,  # tmBreakChar (' ')
+        0x20,  # tmPitchAndFamily (VARIABLE_PITCH | FF_SWISS)
+        0,  # tmCharSet (ANSI_CHARSET)
+        # x = pad byte for alignment
+        0,  # tmOverhang
+        96,  # tmDigitizedAspectX
+        96,  # tmDigitizedAspectY
     )
     emu.mu.mem_write(base + off, tm)
     emu.mu.reg_write(UC_X86_REG_AX, 1)
@@ -1276,7 +1376,7 @@ def _handle_get_rasterizer_caps(emu: SimTowerEmulator, stub: StubDef) -> None:
     off = rs_ptr & 0xFFFF
     base = emu.selector_bases.get(seg, 0)
     rs = struct.pack("<HHH", min(cb, 6), 0x03, 0)  # TT_AVAILABLE | TT_ENABLED
-    emu.mu.mem_write(base + off, rs[:min(cb, 6)])
+    emu.mu.mem_write(base + off, rs[: min(cb, 6)])
     emu.mu.reg_write(UC_X86_REG_AX, 1)
     log.debug("GetRasterizerCaps() -> TT_AVAILABLE|TT_ENABLED")
 
@@ -1314,7 +1414,9 @@ def _handle_get_palette_entries(emu: SimTowerEmulator, stub: StubDef) -> None:
             emu.mu.mem_write(base + off + i * 4, struct.pack("BBBB", r, g, b, 0))
 
     emu.mu.reg_write(UC_X86_REG_AX, c_entries)
-    log.debug("GetPaletteEntries(start=%d, count=%d) -> %d", i_start, c_entries, c_entries)
+    log.debug(
+        "GetPaletteEntries(start=%d, count=%d) -> %d", i_start, c_entries, c_entries
+    )
 
 
 def _handle_wing_create_dc(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -1336,18 +1438,19 @@ def _handle_wing_recommend_dib(emu: SimTowerEmulator, stub: StubDef) -> None:
     base = emu.selector_bases.get(seg, 0)
     # BITMAPINFOHEADER: biSize(4) biWidth(4) biHeight(4) biPlanes(2)
     # biBitCount(2) biCompression(4) biSizeImage(4) ...
-    bih = struct.pack("<IiiHHIIiiII",
-        40,       # biSize
-        640,      # biWidth
-        -480,     # biHeight (negative = top-down)
-        1,        # biPlanes
-        8,        # biBitCount
-        0,        # biCompression (BI_RGB)
-        640*480,  # biSizeImage
-        0,        # biXPelsPerMeter
-        0,        # biYPelsPerMeter
-        256,      # biClrUsed
-        0,        # biClrImportant
+    bih = struct.pack(
+        "<IiiHHIIiiII",
+        40,  # biSize
+        640,  # biWidth
+        -480,  # biHeight (negative = top-down)
+        1,  # biPlanes
+        8,  # biBitCount
+        0,  # biCompression (BI_RGB)
+        640 * 480,  # biSizeImage
+        0,  # biXPelsPerMeter
+        0,  # biYPelsPerMeter
+        256,  # biClrUsed
+        0,  # biClrImportant
     )
     emu.mu.mem_write(base + off, bih)
     emu.mu.reg_write(UC_X86_REG_AX, 1)
@@ -1399,8 +1502,15 @@ def _handle_wing_create_bitmap(emu: SimTowerEmulator, stub: StubDef) -> None:
 
     emu._next_handle += 1
     emu.mu.reg_write(UC_X86_REG_AX, emu._next_handle)
-    log.debug("WinGCreateBitmap(%dx%d %dbpp, %d bytes) -> hbm=0x%04X, bits=%04X:0000",
-              width, abs_height, bpp, pixel_size, emu._next_handle, block.selector)
+    log.debug(
+        "WinGCreateBitmap(%dx%d %dbpp, %d bytes) -> hbm=0x%04X, bits=%04X:0000",
+        width,
+        abs_height,
+        bpp,
+        pixel_size,
+        emu._next_handle,
+        block.selector,
+    )
 
 
 def _handle_fpmath(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -1497,11 +1607,11 @@ def _handle_init_task(emu: SimTowerEmulator, stub: StubDef) -> None:
       ES = PDB/PSP selector (we use DGROUP)
     """
     dgroup_sel = emu.seg_selectors.get(emu.ne.auto_data_seg, 0)
-    emu.mu.reg_write(UC_X86_REG_AX, 1)      # success
-    emu.mu.reg_write(UC_X86_REG_BX, 0x81)   # command line offset in PSP
-    emu.mu.reg_write(UC_X86_REG_CX, 0x1000) # stack limit
-    emu.mu.reg_write(UC_X86_REG_DX, 1)      # nCmdShow = SW_SHOW
-    emu.mu.reg_write(UC_X86_REG_SI, 0)      # no previous instance
+    emu.mu.reg_write(UC_X86_REG_AX, 1)  # success
+    emu.mu.reg_write(UC_X86_REG_BX, 0x81)  # command line offset in PSP
+    emu.mu.reg_write(UC_X86_REG_CX, 0x1000)  # stack limit
+    emu.mu.reg_write(UC_X86_REG_DX, 1)  # nCmdShow = SW_SHOW
+    emu.mu.reg_write(UC_X86_REG_SI, 0)  # no previous instance
     emu.mu.reg_write(UC_X86_REG_DI, dgroup_sel)  # instance handle
     emu.mu.reg_write(UC_X86_REG_ES, dgroup_sel)  # PDB selector
     log.debug("InitTask() -> AX=1 DI=%04X", dgroup_sel)
@@ -1565,7 +1675,7 @@ def _handle_get_text_extent(emu: SimTowerEmulator, stub: StubDef) -> None:
     Return approximate text dimensions: width = nCount * 8, height = 16.
     """
     n_count = _read_stack_word(emu, 4)
-    width = n_count * 8   # ~8 pixels per character
+    width = n_count * 8  # ~8 pixels per character
     height = 16
     emu.mu.reg_write(UC_X86_REG_AX, width & 0xFFFF)
     emu.mu.reg_write(UC_X86_REG_DX, height & 0xFFFF)
@@ -1582,7 +1692,7 @@ def _handle_get_object(emu: SimTowerEmulator, stub: StubDef) -> None:
     seg, off = (lp >> 16) & 0xFFFF, lp & 0xFFFF
     base = emu.selector_bases.get(seg, 0)
     if cb > 0 and cb < 256:
-        emu.mu.mem_write(base + off, b'\x00' * cb)
+        emu.mu.mem_write(base + off, b"\x00" * cb)
     emu.mu.reg_write(UC_X86_REG_AX, cb)
 
 
@@ -1647,13 +1757,17 @@ def _handle_wvsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
         b = emu.selector_bases.get(s, 0)
         d = bytes(emu.mu.mem_read(b + o, 256))
         n = d.find(0)
-        return d[:n].decode("ascii", errors="replace") if n >= 0 else d.decode("ascii", errors="replace")
+        return (
+            d[:n].decode("ascii", errors="replace")
+            if n >= 0
+            else d.decode("ascii", errors="replace")
+        )
 
     # Simple format string parser
     result = []
     i = 0
     while i < len(fmt_str):
-        if fmt_str[i] == '%':
+        if fmt_str[i] == "%":
             i += 1
             if i >= len(fmt_str):
                 break
@@ -1666,18 +1780,18 @@ def _handle_wvsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
                 break
             # Check for 'l' prefix
             is_long = False
-            if fmt_str[i] == 'l':
+            if fmt_str[i] == "l":
                 is_long = True
                 i += 1
             if i >= len(fmt_str):
                 break
             spec = fmt_str[i]
             i += 1
-            if spec == '%':
-                result.append('%')
-            elif spec == 's':
+            if spec == "%":
+                result.append("%")
+            elif spec == "s":
                 result.append(read_string())
-            elif spec in ('d', 'i'):
+            elif spec in ("d", "i"):
                 val = read_dword() if is_long else read_word()
                 if not is_long:
                     if val & 0x8000:
@@ -1687,15 +1801,15 @@ def _handle_wvsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
                         val = val - 0x100000000
                 py_fmt = f"%{flags}d"
                 result.append(py_fmt % val)
-            elif spec == 'u':
+            elif spec == "u":
                 val = read_dword() if is_long else read_word()
                 py_fmt = f"%{flags}d"
                 result.append(py_fmt % val)
-            elif spec in ('x', 'X'):
+            elif spec in ("x", "X"):
                 val = read_dword() if is_long else read_word()
                 py_fmt = f"%{flags}{spec}"
                 result.append(py_fmt % val)
-            elif spec == 'c':
+            elif spec == "c":
                 result.append(chr(read_word() & 0xFF))
             else:
                 result.append(f"%{flags}{spec}")
@@ -1707,7 +1821,7 @@ def _handle_wvsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
     # Write output
     out_seg, out_off = (out_ptr >> 16) & 0xFFFF, out_ptr & 0xFFFF
     out_base = emu.selector_bases.get(out_seg, 0)
-    out_bytes = output.encode("ascii", errors="replace") + b'\x00'
+    out_bytes = output.encode("ascii", errors="replace") + b"\x00"
     emu.mu.mem_write(out_base + out_off, out_bytes)
     emu.mu.reg_write(UC_X86_REG_AX, len(output))
     log.debug("wvsprintf('%s') -> '%s' (%d chars)", fmt_str, output, len(output))
@@ -1760,13 +1874,17 @@ def _handle_wsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
         b = emu.selector_bases.get(s, 0)
         d = bytes(emu.mu.mem_read(b + o, 256))
         n = d.find(0)
-        return d[:n].decode("ascii", errors="replace") if n >= 0 else d.decode("ascii", errors="replace")
+        return (
+            d[:n].decode("ascii", errors="replace")
+            if n >= 0
+            else d.decode("ascii", errors="replace")
+        )
 
     # Simple format string parser (same logic as wvsprintf)
     result = []
     i = 0
     while i < len(fmt_str):
-        if fmt_str[i] == '%':
+        if fmt_str[i] == "%":
             i += 1
             if i >= len(fmt_str):
                 break
@@ -1777,31 +1895,31 @@ def _handle_wsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
             if i >= len(fmt_str):
                 break
             is_long = False
-            if fmt_str[i] == 'l':
+            if fmt_str[i] == "l":
                 is_long = True
                 i += 1
             if i >= len(fmt_str):
                 break
             spec = fmt_str[i]
             i += 1
-            if spec == '%':
-                result.append('%')
-            elif spec == 's':
+            if spec == "%":
+                result.append("%")
+            elif spec == "s":
                 result.append(read_string())
-            elif spec in ('d', 'i'):
+            elif spec in ("d", "i"):
                 val = read_dword() if is_long else read_word()
                 if not is_long and val & 0x8000:
                     val -= 0x10000
                 elif is_long and val & 0x80000000:
                     val -= 0x100000000
                 result.append(f"%{flags}d" % val)
-            elif spec == 'u':
+            elif spec == "u":
                 val = read_dword() if is_long else read_word()
                 result.append(f"%{flags}d" % val)
-            elif spec in ('x', 'X'):
+            elif spec in ("x", "X"):
                 val = read_dword() if is_long else read_word()
                 result.append(f"%{flags}{spec}" % val)
-            elif spec == 'c':
+            elif spec == "c":
                 result.append(chr(read_word() & 0xFF))
             else:
                 result.append(f"%{flags}{spec}")
@@ -1812,7 +1930,7 @@ def _handle_wsprintf(emu: SimTowerEmulator, stub: StubDef) -> None:
     output = "".join(result)
     out_seg, out_off = (out_ptr >> 16) & 0xFFFF, out_ptr & 0xFFFF
     out_base = emu.selector_bases.get(out_seg, 0)
-    out_bytes = output.encode("ascii", errors="replace") + b'\x00'
+    out_bytes = output.encode("ascii", errors="replace") + b"\x00"
     emu.mu.mem_write(out_base + out_off, out_bytes)
     emu.mu.reg_write(UC_X86_REG_AX, len(output))
     log.debug("_wsprintf('%s') -> '%s' (%d chars)", fmt_str, output, len(output))
@@ -1915,7 +2033,7 @@ def _handle_wave_out_get_dev_caps(emu: SimTowerEmulator, stub: StubDef) -> None:
     seg, off = (lp >> 16) & 0xFFFF, lp & 0xFFFF
     base = emu.selector_bases.get(seg, 0)
     if size > 0 and size < 256:
-        emu.mu.mem_write(base + off, b'\x00' * size)
+        emu.mu.mem_write(base + off, b"\x00" * size)
     emu.mu.reg_write(UC_X86_REG_AX, 0)
 
 
@@ -2038,54 +2156,90 @@ STUB_HANDLERS: dict[tuple[str, int], StubHandler] = {
     ("USER", 17): _handle_get_cursor_pos,
     ("USER", 28): _handle_client_to_screen,
     ("USER", 29): _handle_screen_to_client,
-    ("USER", 69): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetCursor -> prev cursor
+    ("USER", 69): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetCursor -> prev cursor
     # USER — window ops (return success)
-    ("USER", 31): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # IsIconic -> FALSE
+    ("USER", 31): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # IsIconic -> FALSE
     ("USER", 34): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # EnableWindow
     ("USER", 37): lambda emu, stub: None,  # SetWindowText (void)
-    ("USER", 47): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # IsWindow -> TRUE
+    ("USER", 47): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 1
+    ),  # IsWindow -> TRUE
     ("USER", 53): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # DestroyWindow
     ("USER", 56): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # MoveWindow
-    ("USER", 62): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetScrollPos -> prev
+    ("USER", 62): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetScrollPos -> prev
     ("USER", 63): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetScrollPos
     ("USER", 64): lambda emu, stub: None,  # SetScrollRange (void)
     ("USER", 65): _handle_get_scroll_range,
     ("USER", 110): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # PostMessage
-    ("USER", 113): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # TranslateMessage
-    ("USER", 114): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # DispatchMessage
+    ("USER", 113): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # TranslateMessage
+    ("USER", 114): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # DispatchMessage
     ("USER", 125): lambda emu, stub: None,  # InvalidateRect (void)
     ("USER", 127): lambda emu, stub: None,  # ValidateRect (void)
-    ("USER", 130): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetClassWord -> prev
-    ("USER", 134): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetWindowWord -> prev
-    ("USER", 154): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # CheckMenuItem -> prev
-    ("USER", 155): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # EnableMenuItem -> prev
-    ("USER", 180): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetSysColor -> 0 (black)
+    ("USER", 130): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetClassWord -> prev
+    ("USER", 134): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetWindowWord -> prev
+    ("USER", 154): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # CheckMenuItem -> prev
+    ("USER", 155): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # EnableMenuItem -> prev
+    ("USER", 180): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # GetSysColor -> 0 (black)
     ("USER", 232): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # SetWindowPos
-    ("USER", 263): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 5),  # GetMenuItemCount
+    ("USER", 263): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 5
+    ),  # GetMenuItemCount
     ("USER", 410): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # InsertMenu
     ("USER", 413): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # RemoveMenu
-    ("USER", 458): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # DestroyCursor
+    ("USER", 458): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 1
+    ),  # DestroyCursor
     ("USER", 466): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # DragDetect
-    ("USER", 59): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetActiveWindow -> prev
-    ("USER", 60): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0x101),  # GetActiveWindow -> main hwnd
-    ("USER", 225): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # EnumTaskWindows -> done
+    ("USER", 59): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetActiveWindow -> prev
+    ("USER", 60): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0x101
+    ),  # GetActiveWindow -> main hwnd
+    ("USER", 225): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # EnumTaskWindows -> done
     # USER — drawing
     ("USER", 81): _handle_fill_rect,
     ("USER", 85): _handle_draw_text,
     # USER — dialogs
-    ("USER", 87): _handle_dialog_box_param,    # DialogBox
-    ("USER", 218): _handle_dialog_box_param,   # DialogBoxIndirect
-    ("USER", 239): _handle_dialog_box_param,   # DialogBoxParam
-    ("USER", 240): _handle_dialog_box_param,   # DialogBoxIndirectParam
-    ("USER", 219): _handle_create_dialog_param, # CreateDialogIndirect
-    ("USER", 241): _handle_create_dialog_param, # CreateDialogParam
+    ("USER", 87): _handle_dialog_box_param,  # DialogBox
+    ("USER", 218): _handle_dialog_box_param,  # DialogBoxIndirect
+    ("USER", 239): _handle_dialog_box_param,  # DialogBoxParam
+    ("USER", 240): _handle_dialog_box_param,  # DialogBoxIndirectParam
+    ("USER", 219): _handle_create_dialog_param,  # CreateDialogIndirect
+    ("USER", 241): _handle_create_dialog_param,  # CreateDialogParam
     # USER — strings
     ("USER", 420): _handle_wsprintf,
     ("USER", 421): _handle_wvsprintf,
     # KERNEL — misc
     ("KERNEL", 59): _handle_write_profile_string,
-    ("KERNEL", 113): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 3),  # __AHSHIFT -> 3
-    ("KERNEL", 137): lambda emu, stub: log.warning("FatalAppExit called!"),  # FatalAppExit
+    ("KERNEL", 113): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 3
+    ),  # __AHSHIFT -> 3
+    ("KERNEL", 137): lambda emu, stub: log.warning(
+        "FatalAppExit called!"
+    ),  # FatalAppExit
     # KERNEL — file I/O
     ("KERNEL", 81): _handle_lclose,
     ("KERNEL", 82): _handle_lread,
@@ -2101,67 +2255,121 @@ STUB_HANDLERS: dict[tuple[str, int], StubHandler] = {
     ("GDI", 346): _handle_set_text_align,
     ("GDI", 370): _handle_get_nearest_palette_index,
     # GDI — drawing (return success)
-    ("GDI", 1): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, _read_stack_dword(emu, 4) & 0xFFFF),  # SetBkColor -> prev color
+    ("GDI", 1): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, _read_stack_dword(emu, 4) & 0xFFFF
+    ),  # SetBkColor -> prev color
     ("GDI", 2): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # SetBkMode
-    ("GDI", 9): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetTextColor -> prev (0=black)
+    ("GDI", 9): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetTextColor -> prev (0=black)
     ("GDI", 19): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # LineTo
-    ("GDI", 20): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # MoveTo -> prev pos (packed DWORD)
+    ("GDI", 20): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # MoveTo -> prev pos (packed DWORD)
     ("GDI", 27): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # Rectangle
     ("GDI", 29): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # PatBlt
     ("GDI", 33): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # TextOut
     ("GDI", 34): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # BitBlt
     ("GDI", 39): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # RestoreDC
     ("GDI", 44): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # SelectClipRgn
-    ("GDI", 78): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetCurrentPosition
+    ("GDI", 78): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # GetCurrentPosition
     ("GDI", 366): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # UpdateColors
     ("GDI", 367): lambda emu, stub: None,  # AnimatePalette (void)
-    ("GDI", 443): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # SetDIBitsToDevice
+    ("GDI", 443): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 1
+    ),  # SetDIBitsToDevice
     # MMSYSTEM
     ("MMSYSTEM", 402): _handle_wave_out_get_dev_caps,
     # USER — misc remaining
     ("USER", 6): lambda emu, stub: None,  # PostQuitMessage (void)
     ("USER", 12): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # KillTimer
     ("USER", 16): lambda emu, stub: None,  # ClipCursor (void)
-    ("USER", 18): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetCapture -> prev hwnd
+    ("USER", 18): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetCapture -> prev hwnd
     ("USER", 19): lambda emu, stub: None,  # ReleaseCapture (void)
-    ("USER", 22): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SetFocus -> prev focus
-    ("USER", 39): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, emu._next_handle),  # BeginPaint -> HDC
+    ("USER", 22): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SetFocus -> prev focus
+    ("USER", 39): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, emu._next_handle
+    ),  # BeginPaint -> HDC
     ("USER", 40): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # EndPaint
     ("USER", 83): _handle_fill_rect,  # FrameRect
     ("USER", 88): lambda emu, stub: None,  # EndDialog (void)
-    ("USER", 90): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # IsDialogMessage
-    ("USER", 91): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetDlgItem -> 0
+    ("USER", 90): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # IsDialogMessage
+    ("USER", 91): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # GetDlgItem -> 0
     ("USER", 92): lambda emu, stub: None,  # SetDlgItemText (void)
-    ("USER", 93): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetDlgItemText -> 0 chars
+    ("USER", 93): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # GetDlgItemText -> 0 chars
     ("USER", 94): lambda emu, stub: None,  # SetDlgItemInt (void)
-    ("USER", 95): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetDlgItemInt -> 0
-    ("USER", 101): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SendDlgItemMessage
+    ("USER", 95): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # GetDlgItemInt -> 0
+    ("USER", 101): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SendDlgItemMessage
     ("USER", 104): lambda emu, stub: None,  # MessageBeep (void)
-    ("USER", 107): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # DefWindowProc
+    ("USER", 107): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # DefWindowProc
     ("USER", 171): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # WinHelp
-    ("USER", 178): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # TranslateAccelerator
-    ("USER", 186): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # SwapMouseButton
+    ("USER", 178): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # TranslateAccelerator
+    ("USER", 186): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # SwapMouseButton
     ("USER", 221): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # ScrollDC
     ("USER", 229): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetTopWindow
     # COMMDLG
-    ("COMMDLG", 1): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # GetOpenFileName -> cancel
+    ("COMMDLG", 1): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # GetOpenFileName -> cancel
     # WAVMIX16 (all no-op, return 0)
-    ("WAVMIX16", 3): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixInit -> NULL (no audio)
+    ("WAVMIX16", 3): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixInit -> NULL (no audio)
     ("WAVMIX16", 4): lambda emu, stub: None,  # WavMixActivate
-    ("WAVMIX16", 5): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixOpenChannel
-    ("WAVMIX16", 6): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixOpenWav
+    ("WAVMIX16", 5): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixOpenChannel
+    ("WAVMIX16", 6): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixOpenWav
     ("WAVMIX16", 7): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixPlay
-    ("WAVMIX16", 9): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixFlushChannel
-    ("WAVMIX16", 10): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixCloseChannel
-    ("WAVMIX16", 11): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixCloseSession
-    ("WAVMIX16", 12): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 0),  # WavMixFreeWav
+    ("WAVMIX16", 9): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixFlushChannel
+    ("WAVMIX16", 10): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixCloseChannel
+    ("WAVMIX16", 11): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixCloseSession
+    ("WAVMIX16", 12): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 0
+    ),  # WavMixFreeWav
     # WING
     ("WING", 1001): _handle_wing_create_dc,
     ("WING", 1002): _handle_wing_recommend_dib,
     ("WING", 1003): _handle_wing_create_bitmap,
-    ("WING", 1005): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 256),  # WinGGetDIBColorTable -> 256
-    ("WING", 1006): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 256),  # WinGSetDIBColorTable -> 256
-    ("WING", 1009): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # WinGStretchBlt
+    ("WING", 1005): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 256
+    ),  # WinGGetDIBColorTable -> 256
+    ("WING", 1006): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 256
+    ),  # WinGSetDIBColorTable -> 256
+    ("WING", 1009): lambda emu, stub: emu.mu.reg_write(
+        UC_X86_REG_AX, 1
+    ),  # WinGStretchBlt
     ("WING", 1010): lambda emu, stub: emu.mu.reg_write(UC_X86_REG_AX, 1),  # WinGBitBlt
     # WIN87EM
     ("WIN87EM", 1): _handle_fpmath,
@@ -2215,8 +2423,12 @@ class SimTowerEmulator:
         # Handler dispatch: linear stub addr -> handler function
         self._stub_handlers: dict[int, StubHandler] = {}
 
+        # Call trap for call_far_pascal: a tiny code segment with HLT
+        self._call_trap_hit = False
+
         self._assign_segments()
         self._build_stubs()
+        self._setup_call_trap()
         self._install_gdt()
         self._load_segments()
         self._apply_all_relocations()
@@ -2359,7 +2571,9 @@ class SimTowerEmulator:
             for reloc in relocs:
                 self._apply_relocation(seg, reloc)
             total += len(relocs)
-        log.info("Applied %d relocations across %d segments", total, len(self.ne.segments))
+        log.info(
+            "Applied %d relocations across %d segments", total, len(self.ne.segments)
+        )
 
     def _apply_relocation(self, seg: NESegmentEntry, reloc: NERelocation) -> None:
         seg_base = self.seg_bases[seg.index]
@@ -2372,9 +2586,13 @@ class SimTowerEmulator:
         elif kind == NERelocation.OSFIXUP:
             self._apply_osfixup(seg_base, seg, reloc)
         elif kind == NERelocation.IMPORTED_NAME:
-            log.warning("IMPORTED_NAME relocation not implemented (offset=0x%04X)", reloc.offset)
+            log.warning(
+                "IMPORTED_NAME relocation not implemented (offset=0x%04X)", reloc.offset
+            )
         else:
-            log.warning("Unknown relocation kind %d at offset 0x%04X", kind, reloc.offset)
+            log.warning(
+                "Unknown relocation kind %d at offset 0x%04X", kind, reloc.offset
+            )
 
     def _resolve_target(self, reloc: NERelocation) -> tuple[int, int] | None:
         """Resolve a relocation target to (selector, offset)."""
@@ -2404,7 +2622,9 @@ class SimTowerEmulator:
 
         return None
 
-    def _patch_chain(self, seg_base: int, reloc: NERelocation, target_sel: int, target_off: int) -> None:
+    def _patch_chain(
+        self, seg_base: int, reloc: NERelocation, target_sel: int, target_off: int
+    ) -> None:
         offset = reloc.offset
         visited = set()
         while offset != 0xFFFF and offset not in visited:
@@ -2414,7 +2634,9 @@ class SimTowerEmulator:
             self._write_fixup(addr, reloc.src_type, target_sel, target_off)
             offset = next_offset
 
-    def _write_fixup(self, addr: int, src_type: int, target_sel: int, target_off: int) -> None:
+    def _write_fixup(
+        self, addr: int, src_type: int, target_sel: int, target_off: int
+    ) -> None:
         if src_type == NERelocation.SRC_FAR32:
             self.mu.mem_write(addr, struct.pack("<HH", target_off, target_sel))
         elif src_type == NERelocation.SRC_OFF16:
@@ -2432,7 +2654,9 @@ class SimTowerEmulator:
             return
         target_sel, target_off = target
         if reloc.is_additive:
-            self._write_fixup(seg_base + reloc.offset, reloc.src_type, target_sel, target_off)
+            self._write_fixup(
+                seg_base + reloc.offset, reloc.src_type, target_sel, target_off
+            )
         else:
             self._patch_chain(seg_base, reloc, target_sel, target_off)
 
@@ -2442,11 +2666,15 @@ class SimTowerEmulator:
             return
         target_sel, target_off = target
         if reloc.is_additive:
-            self._write_fixup(seg_base + reloc.offset, reloc.src_type, target_sel, target_off)
+            self._write_fixup(
+                seg_base + reloc.offset, reloc.src_type, target_sel, target_off
+            )
         else:
             self._patch_chain(seg_base, reloc, target_sel, target_off)
 
-    def _apply_osfixup(self, seg_base: int, seg: NESegmentEntry, reloc: NERelocation) -> None:
+    def _apply_osfixup(
+        self, seg_base: int, seg: NESegmentEntry, reloc: NERelocation
+    ) -> None:
         fixup_type = reloc.param1
         if fixup_type == 5:
             dgroup_sel = self.seg_selectors.get(self.ne.auto_data_seg, 0)
@@ -2454,7 +2682,9 @@ class SimTowerEmulator:
             # For SRC_OFF16, the "offset" to write IS the selector value
             # (OSFIXUP semantics differ from INTERNAL — it's always the selector).
             if reloc.is_additive:
-                self._write_fixup(seg_base + reloc.offset, reloc.src_type, dgroup_sel, dgroup_sel)
+                self._write_fixup(
+                    seg_base + reloc.offset, reloc.src_type, dgroup_sel, dgroup_sel
+                )
             else:
                 self._patch_chain(seg_base, reloc, dgroup_sel, dgroup_sel)
 
@@ -2482,16 +2712,88 @@ class SimTowerEmulator:
 
         log.info(
             "Registers: CS=%04X IP=%04X SS=%04X SP=%04X DS=%04X",
-            cs_sel, self.ne.entry_ip, ss_sel,
-            self.ne.stack_sp or 0xFFFE, dgroup_sel,
+            cs_sel,
+            self.ne.entry_ip,
+            ss_sel,
+            self.ne.stack_sp or 0xFFFE,
+            dgroup_sel,
         )
+
+    # ── Call trap (for call_far_pascal) ────────────────────────────
+
+    def _setup_call_trap(self) -> None:
+        """Set up return traps for both far and near call_* methods."""
+        # Far call trap: a small code segment with HLT
+        self._call_trap_sel = self._alloc_selector(CALL_TRAP_BASE, 15, code=True)
+        self.mu.mem_write(CALL_TRAP_BASE, b"\xf4")
+
+        self._call_trap_hit = False
+        # Per-segment near-call trap offsets: seg_index -> offset of HLT within that segment
+        self._near_trap_offsets: dict[int, int] = {}
+
+    def _ensure_near_trap(self, ne_seg: int) -> int:
+        """Ensure a HLT trap exists just past the code in NE segment ne_seg.
+
+        Extends the GDT limit if necessary. Returns the trap's offset within
+        the segment.
+        """
+        if ne_seg in self._near_trap_offsets:
+            return self._near_trap_offsets[ne_seg]
+
+        seg = self.ne.segments[ne_seg - 1]
+        trap_offset = seg.alloc_size  # first byte past original code
+        sel = self.seg_selectors[ne_seg]
+        seg_base = self.seg_bases[ne_seg]
+
+        # Extend the GDT limit to cover the trap byte
+        new_limit = trap_offset  # limit = last valid offset = trap_offset
+        access = 0x9A  # code, present, DPL=0
+        flags_hi = 0x0  # 16-bit, byte granularity
+        entry = _gdt_entry(seg_base, new_limit, access, flags_hi)
+        self._gdt[sel : sel + 8] = entry
+        self.mu.mem_write(GDT_ADDR + sel, entry)
+
+        # Write HLT at the trap offset
+        self.mu.mem_write(seg_base + trap_offset, b"\xf4")
+
+        # Install a code hook for this specific address
+        trap_linear = seg_base + trap_offset
+        self.mu.hook_add(
+            UC_HOOK_CODE,
+            self._on_call_trap,
+            begin=trap_linear,
+            end=trap_linear + 1,
+        )
+
+        self._near_trap_offsets[ne_seg] = trap_offset
+        log.debug(
+            "Near trap for seg %d at offset 0x%04X (linear 0x%06X)",
+            ne_seg,
+            trap_offset,
+            trap_linear,
+        )
+        return trap_offset
+
+    def _on_call_trap(self, mu: Uc, address: int, size: int, _user_data) -> None:
+        """Code hook: fires when execution reaches a call trap (function returned)."""
+        self._call_trap_hit = True
+        mu.emu_stop()
 
     # ── Hooks ────────────────────────────────────────────────────────
 
     def _install_hooks(self) -> None:
         stub_end = STUB_BASE + 0x10000
-        self.mu.hook_add(UC_HOOK_CODE, self._on_stub_execute, begin=STUB_BASE, end=stub_end)
+        self.mu.hook_add(
+            UC_HOOK_CODE, self._on_stub_execute, begin=STUB_BASE, end=stub_end
+        )
         self.mu.hook_add(UC_HOOK_INTR, self._on_interrupt)
+        # Far call trap hook (for call_far_pascal return detection)
+        self.mu.hook_add(
+            UC_HOOK_CODE,
+            self._on_call_trap,
+            begin=CALL_TRAP_BASE,
+            end=CALL_TRAP_BASE + 1,
+        )
         # Trace hook for debugging — keeps a ring buffer of recent instructions
         self._trace_buf: list[tuple[int, int, int]] = []  # (cs, ip, size)
         self.mu.hook_add(UC_HOOK_CODE, self._on_trace)
@@ -2563,7 +2865,9 @@ class SimTowerEmulator:
             desc = bytes(self._gdt[bx : bx + 8])
             mu.mem_write(es_base + di, desc)
             base_val = desc[2] | (desc[3] << 8) | (desc[4] << 16) | (desc[7] << 24)
-            log.debug("DPMI 000Ah: GetDescriptor(sel=0x%04X) -> base=0x%08X", bx, base_val)
+            log.debug(
+                "DPMI 000Ah: GetDescriptor(sel=0x%04X) -> base=0x%08X", bx, base_val
+            )
         elif ax == 0x000B:
             # Set Descriptor — BX=selector, ES:DI -> 8-byte descriptor
             bx = mu.reg_read(UC_X86_REG_BX)
@@ -2595,8 +2899,15 @@ class SimTowerEmulator:
             base = desc[2] | (desc[3] << 8) | (desc[4] << 16) | (desc[7] << 24)
             self.selector_bases[bx] = base
             limit = desc[0] | (desc[1] << 8) | ((desc[6] & 0x0F) << 16)
-            log.debug("DPMI 000Bh: SetDescriptor(sel=0x%04X, base=0x%08X, limit=0x%05X, ES:DI=%04X:%04X, bytes=%s)",
-                       bx, base, limit, es, di, desc.hex())
+            log.debug(
+                "DPMI 000Bh: SetDescriptor(sel=0x%04X, base=0x%08X, limit=0x%05X, ES:DI=%04X:%04X, bytes=%s)",
+                bx,
+                base,
+                limit,
+                es,
+                di,
+                desc.hex(),
+            )
             # Reload segment registers that use this selector so the CPU
             # picks up the new descriptor (simulates IRET after DPMI call).
             for reg in (UC_X86_REG_CS, UC_X86_REG_DS, UC_X86_REG_ES, UC_X86_REG_SS):
@@ -2618,7 +2929,12 @@ class SimTowerEmulator:
             mu.mem_write(GDT_ADDR + new_sel, src_desc)
             self.selector_bases[new_sel] = base
             mu.reg_write(UC_X86_REG_AX, new_sel)
-            log.debug("DPMI 000Ch: CreateAlias(0x%04X) -> 0x%04X (base=0x%08X)", bx, new_sel, base)
+            log.debug(
+                "DPMI 000Ch: CreateAlias(0x%04X) -> 0x%04X (base=0x%08X)",
+                bx,
+                new_sel,
+                base,
+            )
         elif ax == 0x0501:
             # Allocate Memory Block — BX:CX = size
             bx = mu.reg_read(UC_X86_REG_BX)
@@ -2666,7 +2982,12 @@ class SimTowerEmulator:
                 exit_code = mu.reg_read(UC_X86_REG_AL)
                 cs = mu.reg_read(UC_X86_REG_CS)
                 eip = mu.reg_read(UC_X86_REG_EIP)
-                log.info("INT 21h/4Ch: DOS terminate (exit code %d) at %04X:%04X", exit_code, cs, eip)
+                log.info(
+                    "INT 21h/4Ch: DOS terminate (exit code %d) at %04X:%04X",
+                    exit_code,
+                    cs,
+                    eip,
+                )
                 mu.emu_stop()
             elif ah == 0x30:
                 # GetVersion: AL=major, AH=minor (report DOS 5.0)
@@ -2678,10 +2999,16 @@ class SimTowerEmulator:
                 # Get interrupt vector: AL=int number -> ES:BX=handler
                 # Return a null pointer (no handler installed)
                 mu.reg_write(UC_X86_REG_BX, 0)
-                log.debug("INT 21h/35h: GetInterruptVector(%02Xh) -> 0:0", mu.reg_read(UC_X86_REG_AL))
+                log.debug(
+                    "INT 21h/35h: GetInterruptVector(%02Xh) -> 0:0",
+                    mu.reg_read(UC_X86_REG_AL),
+                )
             elif ah == 0x25:
                 # Set interrupt vector — ignore
-                log.debug("INT 21h/25h: SetInterruptVector(%02Xh) -> no-op", mu.reg_read(UC_X86_REG_AL))
+                log.debug(
+                    "INT 21h/25h: SetInterruptVector(%02Xh) -> no-op",
+                    mu.reg_read(UC_X86_REG_AL),
+                )
             elif ah == 0x44:
                 # IOCTL — subfunction in AL
                 al = mu.reg_read(UC_X86_REG_AL)
@@ -2694,7 +3021,11 @@ class SimTowerEmulator:
                     else:
                         mu.reg_write(UC_X86_REG_DX, 0x0000)  # disk file
                     mu.reg_write(UC_X86_REG_AX, mu.reg_read(UC_X86_REG_DX))
-                    log.debug("INT 21h/4400h: IOCTL GetDevInfo(handle=%d) -> DX=%04X", bx, mu.reg_read(UC_X86_REG_DX))
+                    log.debug(
+                        "INT 21h/4400h: IOCTL GetDevInfo(handle=%d) -> DX=%04X",
+                        bx,
+                        mu.reg_read(UC_X86_REG_DX),
+                    )
                 else:
                     log.debug("INT 21h/44%02Xh: IOCTL subfn %02Xh -> no-op", al, al)
             elif ah == 0x48:
@@ -2752,7 +3083,10 @@ class SimTowerEmulator:
         else:
             log.debug(
                 "STUB CALL: %s.%s (ordinal %d, param_bytes=%d)",
-                stub.module, stub.name, stub.ordinal, stub.param_bytes,
+                stub.module,
+                stub.name,
+                stub.ordinal,
+                stub.param_bytes,
             )
 
     # ── Game-state inspection ───────────────────────────────────────
@@ -2831,12 +3165,14 @@ class SimTowerEmulator:
             rec = bytes(self.mu.mem_read(off, OBJ_STRIDE))
             type_code = rec[10]  # +0x0a
             unit_status = rec[11]  # +0x0b
-            objs.append({
-                "type": type_code,
-                "unit_status": unit_status,
-                "sidecar": struct.unpack_from("<H", rec, 12)[0],
-                "runtime_idx": struct.unpack_from("<h", rec, 14)[0],
-            })
+            objs.append(
+                {
+                    "type": type_code,
+                    "unit_status": unit_status,
+                    "sidecar": struct.unpack_from("<H", rec, 12)[0],
+                    "runtime_idx": struct.unpack_from("<h", rec, 14)[0],
+                }
+            )
         return objs
 
     def dump_tick_state(self) -> None:
@@ -2918,8 +3254,7 @@ class SimTowerEmulator:
             top_states = sorted(states.items(), key=lambda x: -x[1])[:4]
             st_str = " ".join(f"0x{s:02x}:{c}" for s, c in top_states)
             print(
-                f"  {label:14s} n={n:4d}  "
-                f"avg_stress={avg_stress:4d}  states=[{st_str}]"
+                f"  {label:14s} n={n:4d}  avg_stress={avg_stress:4d}  states=[{st_str}]"
             )
 
     def _on_scheduler_entry(self, mu: Uc, address: int, size: int, _user_data) -> None:
@@ -2928,27 +3263,344 @@ class SimTowerEmulator:
             return
         self._tick_hook_count += 1
         # Dump every N ticks (skip the very first call — state not yet initialized)
-        if self._tick_hook_count > 1 and (self._tick_hook_count - 1) % self._tick_dump_interval == 0:
+        if (
+            self._tick_hook_count > 1
+            and (self._tick_hook_count - 1) % self._tick_dump_interval == 0
+        ):
             self.dump_tick_state()
 
     def _install_scheduler_hook(self, dump_interval: int = 100) -> None:
         """Register a code hook on the scheduler function for periodic state dumps."""
         seg_base = self.seg_bases.get(SCHEDULER_NE_SEG)
         if seg_base is None:
-            log.warning("Cannot install scheduler hook: segment %d not loaded", SCHEDULER_NE_SEG)
+            log.warning(
+                "Cannot install scheduler hook: segment %d not loaded", SCHEDULER_NE_SEG
+            )
             return
         self._scheduler_linear = seg_base + SCHEDULER_SEG_OFFSET
         self._tick_hook_count = 0
         self._tick_dump_interval = dump_interval
         # Hook just the first instruction of the scheduler function
         self.mu.hook_add(
-            UC_HOOK_CODE, self._on_scheduler_entry,
-            begin=self._scheduler_linear, end=self._scheduler_linear + 1,
+            UC_HOOK_CODE,
+            self._on_scheduler_entry,
+            begin=self._scheduler_linear,
+            end=self._scheduler_linear + 1,
         )
         log.info(
             "Scheduler hook installed at linear 0x%06X (every %d ticks)",
-            self._scheduler_linear, dump_interval,
+            self._scheduler_linear,
+            dump_interval,
         )
+
+    # ── Programmatic construction ───────────────────────────────────
+
+    def call_far(
+        self,
+        ne_seg: int,
+        offset: int,
+        params: list[int],
+        max_instructions: int = 10_000_000,
+    ) -> int:
+        """Call a __cdecl16far function in the NE binary.
+
+        Parameters are pushed **right-to-left** (C/cdecl convention — first
+        param ends up closest to SP after the return address). The callee
+        returns via ``retf`` without stack cleanup; the caller (us) restores SP.
+
+        Saves and restores all CPU registers; memory side-effects are kept.
+
+        Args:
+            ne_seg: NE segment number (1-based).
+            offset: Offset within the segment.
+            params: Parameters in source-order (leftmost first). Each is a WORD.
+            max_instructions: Safety cap on executed instructions.
+
+        Returns:
+            AX register value after the call completes.
+        """
+        target_sel = self.seg_selectors[ne_seg]
+
+        save_regs = (
+            UC_X86_REG_AX,
+            UC_X86_REG_BX,
+            UC_X86_REG_CX,
+            UC_X86_REG_DX,
+            UC_X86_REG_SI,
+            UC_X86_REG_DI,
+            UC_X86_REG_BP,
+            UC_X86_REG_CS,
+            UC_X86_REG_EIP,
+            UC_X86_REG_SS,
+            UC_X86_REG_SP,
+            UC_X86_REG_DS,
+            UC_X86_REG_ES,
+            UC_X86_REG_EFLAGS,
+        )
+        saved = {r: self.mu.reg_read(r) for r in save_regs}
+
+        ss = self.mu.reg_read(UC_X86_REG_SS)
+        sp = self.mu.reg_read(UC_X86_REG_SP)
+        ss_base = self.selector_bases[ss]
+
+        # Push params right-to-left (cdecl: first param closest to SP)
+        for param in reversed(params):
+            sp = (sp - 2) & 0xFFFF
+            self.mu.mem_write(ss_base + sp, struct.pack("<H", param & 0xFFFF))
+
+        # Push far return address: CS then IP
+        sp = (sp - 2) & 0xFFFF
+        self.mu.mem_write(ss_base + sp, struct.pack("<H", self._call_trap_sel))
+        sp = (sp - 2) & 0xFFFF
+        self.mu.mem_write(ss_base + sp, struct.pack("<H", 0))  # IP = 0
+
+        self.mu.reg_write(UC_X86_REG_SP, sp)
+        self.mu.reg_write(UC_X86_REG_CS, target_sel)
+        self.mu.reg_write(UC_X86_REG_EIP, offset)
+
+        self._call_trap_hit = False
+        remaining = max_instructions
+        chunk = min(100_000, max_instructions)
+        while remaining > 0 and not self._call_trap_hit:
+            run_count = min(chunk, remaining)
+            try:
+                eip_now = self.mu.reg_read(UC_X86_REG_EIP)
+                self.mu.emu_start(eip_now, 0xFFFF, count=run_count)
+            except UcError as e:
+                if not self._call_trap_hit:
+                    cs_now = self.mu.reg_read(UC_X86_REG_CS)
+                    ip_now = self.mu.reg_read(UC_X86_REG_EIP)
+                    log.error("call_far error at %04X:%04X: %s", cs_now, ip_now, e)
+                    raise
+            remaining -= run_count
+
+        if not self._call_trap_hit:
+            log.warning("call_far: function did not return (ran out of instructions?)")
+
+        result_ax = self.mu.reg_read(UC_X86_REG_AX)
+
+        # Restore all registers (SP restoration also handles cdecl stack cleanup)
+        for r, v in saved.items():
+            self.mu.reg_write(r, v)
+
+        return result_ax
+
+    def ensure_floor_blob(self, floor_idx: int) -> int:
+        """Ensure a floor blob exists for the given floor index.
+
+        Allocates a zeroed heap block and writes its far pointer into the floor
+        table if one doesn't already exist.
+
+        Returns:
+            Linear address of the floor blob.
+        """
+        existing = self._resolve_floor_blob(floor_idx)
+        if existing is not None:
+            return existing
+
+        # 6-byte header + 150 × 0x12-byte records
+        blob_size = 6 + 150 * OBJ_STRIDE
+        handle = self.heap.alloc(blob_size, 0x0040, self)  # GMEM_ZEROINIT
+        if handle == 0:
+            raise RuntimeError(f"Failed to allocate floor blob for floor {floor_idx}")
+
+        block = self.heap.blocks[handle]
+        # Write far pointer (offset:segment) into floor_tables array
+        base_off = DS_OFF["floor_tables_ptr"] + floor_idx * 4
+        ds_base = self._ds_base
+        self.mu.mem_write(ds_base + base_off, struct.pack("<HH", 0, handle))
+
+        log.info(
+            "Allocated floor blob for floor_idx=%d at linear 0x%06X (sel 0x%04X)",
+            floor_idx,
+            block.linear,
+            handle,
+        )
+        return block.linear
+
+    def build_object(
+        self,
+        type_code: int,
+        floor_logical: int,
+        left_tile: int,
+        right_tile: int,
+        *,
+        variant: int = 0,
+        aux: int = 0,
+        skip_cost: bool = True,
+    ) -> bool:
+        """Place an object by calling place_object_on_floor in the binary.
+
+        Args:
+            type_code: Facility type (3=single, 4=twin, 5=suite, 6=retail,
+                       7=office, 9=condo, 0xA=fast-food, 0xC=restaurant,
+                       0xE=security, 0xF=housekeeping).
+            floor_logical: Logical floor (-10 to 109; 0 = lobby).
+            left_tile: Left tile index.
+            right_tile: Right tile index (left + width_in_tiles).
+            variant: Sub-variant byte (default 0).
+            aux: Family-specific auxiliary word (default 0).
+            skip_cost: If True, skip cost/funds validation (default True).
+
+        Returns:
+            True if placement succeeded (AX != 0).
+
+        Note:
+            Above-grade floors (>0) require support from a lobby/floor span on
+            floor 0. Place a lobby first or use write_floor_object_direct to
+            bypass validation.
+        """
+        floor_idx = floor_logical + 10
+        self.ensure_floor_blob(floor_idx)
+
+        # place_object_on_floor(type, variant, aux, floor_idx, left, right, skip_cost)
+        # 7 params — the decompiler's "param_1" was a phantom CS register, not a real arg.
+        params = [
+            type_code,
+            variant,
+            aux,
+            floor_idx,
+            left_tile,
+            right_tile,
+            1 if skip_cost else 0,
+        ]
+        result = self.call_far(PLACE_OBJ_NE_SEG, PLACE_OBJ_OFFSET, params)
+        ok = result != 0
+        label = FAMILY_NAMES.get(type_code, f"0x{type_code:02x}")
+        if ok:
+            log.info(
+                "Built %s on floor %d tiles [%d, %d)",
+                label,
+                floor_logical,
+                left_tile,
+                right_tile,
+            )
+        else:
+            log.warning(
+                "Failed to build %s on floor %d tiles [%d, %d)",
+                label,
+                floor_logical,
+                left_tile,
+                right_tile,
+            )
+        return ok
+
+    def setup_floor_support(
+        self,
+        floor_logical: int,
+        left_tile: int,
+        right_tile: int,
+    ) -> None:
+        """Ensure the floor below has a blob with enough span for the support
+        validator to accept placements on *floor_logical*.
+
+        The binary's support table at DS:0xBE6A + idx*4 is really the floor
+        blob table at DS:0xBE6E + (idx-1)*4.  Support for floor N is derived
+        from the object extent recorded in floor_blob[N-1].
+
+        This method ensures floor_blob[floor_logical-1] exists and that its
+        header records a span at least as wide as [left_tile, right_tile).
+        """
+        below_idx = floor_logical + 10 - 1  # floor index of the floor below
+        blob_addr = self.ensure_floor_blob(below_idx)
+
+        # Read current header: count(u16), left(u16), right(u16)
+        hdr = bytes(self.mu.mem_read(blob_addr, 6))
+        count, cur_left, cur_right = struct.unpack_from("<HHH", hdr)
+
+        if count == 0:
+            # Empty blob — set a phantom count of 1 and the requested span
+            self.mu.mem_write(blob_addr, struct.pack("<HHH", 1, left_tile, right_tile))
+        else:
+            # Widen the span if necessary
+            new_left = min(cur_left, left_tile)
+            new_right = max(cur_right, right_tile)
+            if new_left != cur_left or new_right != cur_right:
+                self.mu.mem_write(
+                    blob_addr + 2, struct.pack("<HH", new_left, new_right)
+                )
+
+        log.info(
+            "Set support for floor %d via floor_blob[%d]: tiles [%d, %d)",
+            floor_logical,
+            below_idx,
+            left_tile,
+            right_tile,
+        )
+
+    def write_floor_object_direct(
+        self,
+        floor_logical: int,
+        type_code: int,
+        left_tile: int,
+        right_tile: int,
+        *,
+        variant: int = 0,
+        aux: int = 0,
+        unit_status: int = 0xFF,
+        occupied: int = 1,
+        eval_level: int | None = None,
+    ) -> int:
+        """Write an object record directly into a floor blob, bypassing all
+        binary validation and runtime entity setup.
+
+        Useful for bootstrapping tower state (e.g. lobby/support spans) before
+        calling build_object for types that need validation to pass.
+
+        Returns:
+            The slot index of the new object, or -1 on failure.
+        """
+        floor_idx = floor_logical + 10
+        blob = self.ensure_floor_blob(floor_idx)
+
+        count = struct.unpack_from("<H", self.mu.mem_read(blob, 2))[0]
+        if count >= 150:
+            log.error("Floor %d is full (150 objects)", floor_logical)
+            return -1
+
+        slot = count
+        # Update count
+        self.mu.mem_write(blob, struct.pack("<H", count + 1))
+
+        # Update floor left/right boundaries
+        fl = struct.unpack_from("<H", self.mu.mem_read(blob + 2, 2))[0]
+        fr = struct.unpack_from("<H", self.mu.mem_read(blob + 4, 2))[0]
+        if count == 0:
+            fl, fr = left_tile, right_tile
+        else:
+            fl = min(fl, left_tile)
+            fr = max(fr, right_tile)
+        self.mu.mem_write(blob + 2, struct.pack("<HH", fl, fr))
+
+        if eval_level is None:
+            eval_level = 1 if type_code in (3, 4, 5, 7, 9, 10) else 4
+
+        # Write the 0x12-byte record at blob + 6 + slot * OBJ_STRIDE
+        rec_off = blob + 6 + slot * OBJ_STRIDE
+        rec = bytearray(OBJ_STRIDE)
+        struct.pack_into("<HH", rec, 0, left_tile, right_tile)
+        rec[4] = type_code & 0xFF
+        rec[5] = variant & 0xFF
+        struct.pack_into("<H", rec, 6, aux & 0xFFFF)
+        # bytes 8..11 left as zero
+        rec[0xC] = unit_status & 0xFF
+        rec[0xD] = 1
+        rec[0xE] = occupied & 0xFF
+        rec[0xF] = 0xFF
+        rec[0x10] = eval_level & 0xFF
+        rec[0x11] = 0
+        self.mu.mem_write(rec_off, bytes(rec))
+
+        label = FAMILY_NAMES.get(type_code, f"0x{type_code:02x}")
+        log.info(
+            "Direct-wrote %s slot %d on floor %d tiles [%d, %d)",
+            label,
+            slot,
+            floor_logical,
+            left_tile,
+            right_tile,
+        )
+        return slot
 
     # ── Execution ────────────────────────────────────────────────────
 
@@ -2957,7 +3609,12 @@ class SimTowerEmulator:
         eip = self.mu.reg_read(UC_X86_REG_EIP)
         cs_base = self.selector_bases.get(cs_sel, 0)
 
-        log.info("Starting emulation at %04X:%04X (linear 0x%06X)", cs_sel, eip, cs_base + eip)
+        log.info(
+            "Starting emulation at %04X:%04X (linear 0x%06X)",
+            cs_sel,
+            eip,
+            cs_base + eip,
+        )
 
         try:
             self.mu.emu_start(eip, 0xFFFF, count=max_instructions)
@@ -2969,35 +3626,93 @@ class SimTowerEmulator:
 
     def dump_regs(self) -> str:
         regs = {
-            "AX": UC_X86_REG_AX, "BX": UC_X86_REG_BX,
-            "CX": UC_X86_REG_CX, "DX": UC_X86_REG_DX,
-            "SI": UC_X86_REG_SI, "DI": UC_X86_REG_DI,
-            "SP": UC_X86_REG_SP, "BP": UC_X86_REG_BP,
-            "CS": UC_X86_REG_CS, "DS": UC_X86_REG_DS,
-            "ES": UC_X86_REG_ES, "SS": UC_X86_REG_SS,
+            "AX": UC_X86_REG_AX,
+            "BX": UC_X86_REG_BX,
+            "CX": UC_X86_REG_CX,
+            "DX": UC_X86_REG_DX,
+            "SI": UC_X86_REG_SI,
+            "DI": UC_X86_REG_DI,
+            "SP": UC_X86_REG_SP,
+            "BP": UC_X86_REG_BP,
+            "CS": UC_X86_REG_CS,
+            "DS": UC_X86_REG_DS,
+            "ES": UC_X86_REG_ES,
+            "SS": UC_X86_REG_SS,
         }
-        return " ".join(f"{name}={self.mu.reg_read(reg):04X}" for name, reg in regs.items())
+        return " ".join(
+            f"{name}={self.mu.reg_read(reg):04X}" for name, reg in regs.items()
+        )
 
 
 def main() -> None:
     import sys
 
-    logging.basicConfig(level=logging.INFO, format="%(name)s %(levelname)s: %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(name)s %(levelname)s: %(message)s"
+    )
 
     exe_path = sys.argv[1] if len(sys.argv) > 1 else "src/simtower/SIMTOWER.EXE"
-    dump_interval = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-    max_insns = int(sys.argv[3]) if len(sys.argv) > 3 else 50_000_000
+    mode = sys.argv[2] if len(sys.argv) > 2 else "run"
+    dump_interval = int(sys.argv[3]) if len(sys.argv) > 3 else 100
+    max_insns = int(sys.argv[4]) if len(sys.argv) > 4 else 50_000_000
 
     emu = SimTowerEmulator(exe_path)
     emu._install_scheduler_hook(dump_interval=dump_interval)
     print(f"Initial registers: {emu.dump_regs()}")
 
-    try:
-        emu.run(max_instructions=max_insns)
-    except RuntimeError as e:
-        print(f"Stopped: {e}")
+    if mode == "build":
+        # Demo: run through init, build objects, then continue simulation
+        print("\n=== Phase 1: Run through initialization ===")
+        try:
+            emu.run(max_instructions=5_000_000)
+        except RuntimeError as e:
+            print(f"Init stopped: {e}")
 
-    print(f"Final registers: {emu.dump_regs()}")
+        print("\n=== Phase 2: Build objects ===")
+        emu.dump_tick_state()
+
+        # Bootstrap a lobby on floor 0 using direct write (lobby uses drag
+        # placer in the binary, so we bypass validation here)
+        emu.write_floor_object_direct(0, type_code=0x18, left_tile=100, right_tile=200)
+
+        # Set up support spans for above-grade floors.  Support for floor N
+        # is derived from the floor blob of floor N-1, so this ensures blobs
+        # exist below each target floor with a wide-enough span header.
+        for fl in range(1, 11):
+            emu.setup_floor_support(fl, left_tile=100, right_tile=200)
+
+        # Place objects via the binary's placement function
+        placements = [
+            (7, 1, 100, 108),  # Office (8 tiles)
+            (7, 1, 108, 116),  # Office
+            (7, 1, 116, 124),  # Office
+            (3, 2, 100, 104),  # Single hotel (4 tiles)
+            (3, 2, 104, 108),  # Single hotel
+            (3, 2, 108, 112),  # Single hotel
+            (9, 3, 100, 104),  # Condo (4 tiles)
+            (9, 3, 104, 108),  # Condo
+            (0xA, 1, 124, 132),  # Fast food (8 tiles)
+            (0xC, 1, 132, 148),  # Restaurant (16 tiles)
+            (6, 1, 148, 156),  # Retail (8 tiles)
+        ]
+        for typ, fl, left, right in placements:
+            emu.build_object(
+                type_code=typ, floor_logical=fl, left_tile=left, right_tile=right
+            )
+
+        print("\n=== Phase 3: Continue simulation ===")
+        emu.dump_tick_state()
+        try:
+            emu.run(max_instructions=max_insns)
+        except RuntimeError as e:
+            print(f"Stopped: {e}")
+    else:
+        try:
+            emu.run(max_instructions=max_insns)
+        except RuntimeError as e:
+            print(f"Stopped: {e}")
+
+    print(f"\nFinal registers: {emu.dump_regs()}")
     print(f"Scheduler entered {emu._tick_hook_count} times")
     if emu._tick_hook_count > 0:
         print("\n--- Final state ---")
