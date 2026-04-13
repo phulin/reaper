@@ -113,6 +113,10 @@ PLACE_SPAN_OFFSET = 0x293E
 DRAG_SPAN_NE_SEG = 65
 DRAG_SPAN_OFFSET = 0x27CE
 
+# place_stairs_or_escalator_link: Ghidra 0x1200149c = NE seg 65, offset 0x149c
+PLACE_STAIRS_NE_SEG = 65
+PLACE_STAIRS_OFFSET = 0x149C
+
 # Family code → human label (most common families)
 FAMILY_NAMES: dict[int, str] = {
     3: "single",
@@ -3489,6 +3493,42 @@ class SimTowerEmulator:
             )
         return ok
 
+    def build_stairs(
+        self,
+        top_floor_logical: int,
+        left_tile: int,
+    ) -> bool:
+        """Place a 1-floor stairway connecting top_floor and the floor below it.
+
+        Calls place_stairs_or_escalator_link in the binary.
+        Params (cdecl16far): cost_param, top_floor_idx, tile_pos, mode.
+        mode bit 0 = 1 for stairs; upper bits encode half-span (0 for 1-floor).
+        """
+        top_floor_idx = top_floor_logical + 10
+        # Ensure floor blobs exist for both floors
+        self.ensure_floor_blob(top_floor_idx)
+        self.ensure_floor_blob(top_floor_idx - 1)
+
+        # cost_param: pass 0 (funds are available, game has $20k internal)
+        params = [0, top_floor_idx, left_tile, 1]  # mode=1 = stairs
+        result = self.call_far(PLACE_STAIRS_NE_SEG, PLACE_STAIRS_OFFSET, params)
+        ok = result != 0
+        if ok:
+            log.info(
+                "Built stairs from floor %d to %d at tile %d",
+                top_floor_logical - 1,
+                top_floor_logical,
+                left_tile,
+            )
+        else:
+            log.warning(
+                "Failed to build stairs from floor %d to %d at tile %d",
+                top_floor_logical - 1,
+                top_floor_logical,
+                left_tile,
+            )
+        return ok
+
     def setup_floor_support(
         self,
         floor_logical: int,
@@ -3658,7 +3698,7 @@ def main() -> None:
     exe_path = sys.argv[1] if len(sys.argv) > 1 else "src/simtower/SIMTOWER.EXE"
     mode = sys.argv[2] if len(sys.argv) > 2 else "run"
     dump_interval = int(sys.argv[3]) if len(sys.argv) > 3 else 100
-    max_insns = int(sys.argv[4]) if len(sys.argv) > 4 else 50_000_000
+    max_insns = int(sys.argv[4]) if len(sys.argv) > 4 else 100_000_000
 
     emu = SimTowerEmulator(exe_path)
     emu._install_scheduler_hook(dump_interval=dump_interval)
@@ -3668,41 +3708,30 @@ def main() -> None:
         # Demo: run through init, build objects, then continue simulation
         print("\n=== Phase 1: Run through initialization ===")
         try:
-            emu.run(max_instructions=5_000_000)
+            emu.run(max_instructions=20_000_000)
         except RuntimeError as e:
             print(f"Init stopped: {e}")
 
-        print("\n=== Phase 2: Build objects ===")
+        print("\n=== Phase 1 complete (ticks=%d) ===" % emu._tick_hook_count)
         emu.dump_tick_state()
 
-        # Bootstrap a lobby on floor 0 using direct write (lobby uses drag
-        # placer in the binary, so we bypass validation here)
+        # Bootstrap a lobby on floor 1 (floor_id 10, logical 0) using direct
+        # write — lobby uses drag placer in the binary, so we bypass it.
         emu.write_floor_object_direct(0, type_code=0x18, left_tile=100, right_tile=200)
 
-        # Set up support spans for above-grade floors.  Support for floor N
-        # is derived from the floor blob of floor N-1, so this ensures blobs
-        # exist below each target floor with a wide-enough span header.
-        for fl in range(1, 11):
+        # Set up support spans for above-grade floors
+        for fl in range(1, 4):
             emu.setup_floor_support(fl, left_tile=100, right_tile=200)
 
-        # Place objects via the binary's placement function
-        placements = [
-            (7, 1, 100, 108),  # Office (8 tiles)
-            (7, 1, 108, 116),  # Office
-            (7, 1, 116, 124),  # Office
-            (3, 2, 100, 104),  # Single hotel (4 tiles)
-            (3, 2, 104, 108),  # Single hotel
-            (3, 2, 108, 112),  # Single hotel
-            (9, 3, 100, 104),  # Condo (4 tiles)
-            (9, 3, 104, 108),  # Condo
-            (0xA, 1, 124, 132),  # Fast food (8 tiles)
-            (0xC, 1, 132, 148),  # Restaurant (16 tiles)
-            (6, 1, 148, 156),  # Retail (8 tiles)
-        ]
-        for typ, fl, left, right in placements:
-            emu.build_object(
-                type_code=typ, floor_logical=fl, left_tile=left, right_tile=right
-            )
+        # Place offices (width 9) on floors 2 and 3 (logical 1 and 2)
+        for fl in (1, 2):
+            emu.build_object(type_code=7, floor_logical=fl, left_tile=100, right_tile=109)
+            emu.build_object(type_code=7, floor_logical=fl, left_tile=109, right_tile=118)
+
+        # Place stairs connecting floor 1→2 and 2→3 (logical 0→1 and 1→2)
+        # Stairs need 8-tile footprint overlapping existing objects
+        emu.build_stairs(top_floor_logical=1, left_tile=100)
+        emu.build_stairs(top_floor_logical=2, left_tile=100)
 
         print("\n=== Phase 3: Continue simulation ===")
         emu.dump_tick_state()

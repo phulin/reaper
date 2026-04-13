@@ -72,6 +72,7 @@ report.md
 /artifacts/
 /specs/
 /analysis*/
+/old-analysis/
 *.elf
 *.so
 *.dll
