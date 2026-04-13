@@ -53,6 +53,8 @@ from simtower.constants import (
     PLACE_OBJ_OFFSET,
     PLACE_STAIRS_NE_SEG,
     PLACE_STAIRS_OFFSET,
+    RNG_NE_SEG,
+    RNG_SEG_OFFSET,
     SCHEDULER_NE_SEG,
     SCHEDULER_SEG_OFFSET,
     SIM_REC_SIZE,
@@ -118,9 +120,11 @@ class SimTowerEmulator:
         self._next_atom: int = 0xC000
         self._next_hwnd: int = 0x100
         self._tick_count: int = 0
+        self._rng_call_count: int = 0
         self._show_sims: bool = False
         self._output_json: bool = False
         self._build_spec: dict | None = None
+        self._build_config: dict | None = None
 
         # Handler dispatch: linear stub addr -> handler function
         self._stub_handlers: dict[int, StubHandler] = {}
@@ -496,9 +500,23 @@ class SimTowerEmulator:
             begin=CALL_TRAP_BASE,
             end=CALL_TRAP_BASE + 1,
         )
+        # RNG call counter hook
+        rng_base = self.seg_bases.get(RNG_NE_SEG)
+        if rng_base is not None:
+            rng_linear = rng_base + RNG_SEG_OFFSET
+            self.mu.hook_add(
+                UC_HOOK_CODE,
+                self._on_rng_call,
+                begin=rng_linear,
+                end=rng_linear + 1,
+            )
         # Trace hook for debugging — keeps a ring buffer of recent instructions
         self._trace_buf: list[tuple[int, int, int]] = []  # (cs, ip, size)
         # self.mu.hook_add(UC_HOOK_CODE, self._on_trace)
+
+    def _on_rng_call(self, mu: Uc, address: int, size: int, _user_data) -> None:
+        """Code hook: fires on each sample_lcg15 entry."""
+        self._rng_call_count += 1
 
     def _handle_dpmi(self, mu: Uc) -> None:
         """Handle INT 31h (DPMI) calls."""
@@ -906,6 +924,7 @@ class SimTowerEmulator:
             "calendar_phase": self._ds_u8(d["calendar_phase"]),
             "metro_floor": self._ds_i16(d["metro_floor"]),
             "population": self._ds_i32(d["primary_family_ledger_total"]),
+            "rng_calls": self._rng_call_count,
             "gates": {
                 "security": bool(self._ds_u8(d["security_placed"])),
                 "office": bool(self._ds_u8(d["office_placed"])),
@@ -1564,7 +1583,7 @@ def _apply_default_build(emu: SimTowerEmulator) -> None:
 def _place_build_objects(emu: SimTowerEmulator) -> None:
     """Execute the build plan stored on the emulator by _apply_build_json or
     _apply_default_build."""
-    spec = getattr(emu, "_build_spec", None)
+    spec = emu._build_spec
     if spec is None:
         return
 
@@ -1724,7 +1743,7 @@ def main() -> None:
         _apply_default_build(emu)
 
     # Build-JSON config overrides CLI args
-    cfg = getattr(emu, "_build_config", {})
+    cfg = emu._build_config or {}
     dump_interval = cfg.get("dump_interval", args.dump_interval)
     max_insns = cfg.get("max_instructions", args.max_insns)
     max_ticks = cfg.get("max_ticks", 0)

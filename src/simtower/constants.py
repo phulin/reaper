@@ -54,6 +54,10 @@ DS_OFF = {
 SCHEDULER_NE_SEG = 66
 SCHEDULER_SEG_OFFSET = 0x0196
 
+# sample_lcg15 (RNG) lives in NE segment 1 at offset 0x324d.
+RNG_NE_SEG = 1
+RNG_SEG_OFFSET = 0x324D
+
 # Per-entity sim record: 16 bytes, accessed via g_sim_table + index*16
 SIM_REC_SIZE = 16
 
