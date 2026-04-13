@@ -508,7 +508,7 @@ class SimTowerEmulator:
                 UC_HOOK_CODE,
                 self._on_rng_call,
                 begin=rng_linear,
-                end=rng_linear + 1,
+                end=rng_linear,
             )
         # Trace hook for debugging — keeps a ring buffer of recent instructions
         self._trace_buf: list[tuple[int, int, int]] = []  # (cs, ip, size)
