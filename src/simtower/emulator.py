@@ -132,6 +132,27 @@ FAMILY_NAMES: dict[int, str] = {
     0x12: "entertainment",
     0x1D: "cinema",
     0x21: "cathedral",
+    0x24: "cathedral-a",
+    0x25: "cathedral-b",
+    0x26: "cathedral-c",
+    0x27: "cathedral-d",
+    0x28: "cathedral-e",
+}
+
+# Sim state byte → human label (from binary analysis of state machines)
+SIM_STATE_NAMES: dict[int, str] = {
+    0x00: "init",
+    0x01: "active",
+    0x03: "arrived",
+    0x05: "returning",
+    0x10: "occupied",
+    0x20: "working",
+    0x24: "vacant",
+    0x25: "open",
+    0x27: "parked",
+    0x45: "transit-ret",
+    0x60: "transit-out",
+    0x62: "transit-ret2",
 }
 
 # Type alias for stub handler functions
@@ -2424,6 +2445,7 @@ class SimTowerEmulator:
         self._next_atom: int = 0xC000
         self._next_hwnd: int = 0x100
         self._tick_count: int = 0
+        self._show_sims: bool = False
 
         # Handler dispatch: linear stub addr -> handler function
         self._stub_handlers: dict[int, StubHandler] = {}
@@ -3180,8 +3202,10 @@ class SimTowerEmulator:
             )
         return objs
 
-    def dump_tick_state(self) -> None:
+    def dump_tick_state(self, show_sims: bool | None = None) -> None:
         """Print a summary of the current simulation state."""
+        if show_sims is None:
+            show_sims = self._show_sims
         d = DS_OFF
         day_tick = self._ds_u16(d["day_tick"])
         day_counter = self._ds_i32(d["day_counter"])
@@ -3211,21 +3235,9 @@ class SimTowerEmulator:
         if flags:
             print(f"  gates: {' '.join(flags)}")
 
-        # Floor objects summary
-        type_counts: dict[int, int] = defaultdict(int)
-        floors_with_objects = 0
-        for fi in range(120):
-            objs = self._read_floor_objects(fi)
-            if objs:
-                floors_with_objects += 1
-                for o in objs:
-                    type_counts[o["type"]] += 1
-        if type_counts:
-            items = sorted(type_counts.items(), key=lambda x: -x[1])
-            parts = [f"{FAMILY_NAMES.get(t, f'0x{t:02x}')}:{n}" for t, n in items]
-            print(f"  objects ({floors_with_objects} floors): {' '.join(parts)}")
-
         # Sim table summary
+        if not show_sims:
+            return
         sim_base = self._resolve_sim_table_base()
         sim_count = self._ds_i32(d["sim_count"])
         if sim_base is None or sim_count <= 0:
@@ -3250,18 +3262,25 @@ class SimTowerEmulator:
             print("  (no active sims)")
             return
 
-        # Print per-family summary
+        print(f"  sims: {sum(family_counts.values())} active ({sim_count} allocated)")
         for fam in sorted(family_counts):
             label = FAMILY_NAMES.get(fam, f"0x{fam:02x}")
             n = family_counts[fam]
             stresses = family_stress.get(fam, [])
             avg_stress = sum(stresses) // len(stresses) if stresses else 0
+            min_stress = min(stresses) if stresses else 0
+            max_stress = max(stresses) if stresses else 0
             states = state_hist[fam]
-            top_states = sorted(states.items(), key=lambda x: -x[1])[:4]
-            st_str = " ".join(f"0x{s:02x}:{c}" for s, c in top_states)
-            print(
-                f"  {label:14s} n={n:4d}  avg_stress={avg_stress:4d}  states=[{st_str}]"
+            top_states = sorted(states.items(), key=lambda x: -x[1])[:5]
+            st_str = " ".join(
+                f"{SIM_STATE_NAMES.get(s, f'0x{s:02x}')}:{c}" for s, c in top_states
             )
+            stress_str = (
+                f"stress={avg_stress:4d} [{min_stress}-{max_stress}]"
+                if stresses
+                else "stress=   -"
+            )
+            print(f"  {label:14s} n={n:4d}  {stress_str}  [{st_str}]")
 
     def _on_scheduler_entry(self, mu: Uc, address: int, size: int, _user_data) -> None:
         """Code hook: fires when run_simulation_day_scheduler is entered."""
@@ -3689,23 +3708,28 @@ class SimTowerEmulator:
 
 
 def main() -> None:
-    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="SimTower NE emulator")
+    parser.add_argument("exe", nargs="?", default="src/simtower/SIMTOWER.EXE")
+    parser.add_argument("--mode", choices=["run", "build"], default="run")
+    parser.add_argument("--dump-interval", type=int, default=100,
+                        help="dump state every N scheduler ticks")
+    parser.add_argument("--max-insns", type=int, default=100_000_000)
+    parser.add_argument("--sims", action="store_true",
+                        help="show per-family sim state/stress each tick dump")
+    args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO, format="%(name)s %(levelname)s: %(message)s"
     )
 
-    exe_path = sys.argv[1] if len(sys.argv) > 1 else "src/simtower/SIMTOWER.EXE"
-    mode = sys.argv[2] if len(sys.argv) > 2 else "run"
-    dump_interval = int(sys.argv[3]) if len(sys.argv) > 3 else 100
-    max_insns = int(sys.argv[4]) if len(sys.argv) > 4 else 100_000_000
-
-    emu = SimTowerEmulator(exe_path)
-    emu._install_scheduler_hook(dump_interval=dump_interval)
+    emu = SimTowerEmulator(args.exe)
+    emu._show_sims = args.sims
+    emu._install_scheduler_hook(dump_interval=args.dump_interval)
     print(f"Initial registers: {emu.dump_regs()}")
 
-    if mode == "build":
-        # Demo: run through init, build objects, then continue simulation
+    if args.mode == "build":
         print("\n=== Phase 1: Run through initialization ===")
         try:
             emu.run(max_instructions=20_000_000)
@@ -3736,12 +3760,12 @@ def main() -> None:
         print("\n=== Phase 3: Continue simulation ===")
         emu.dump_tick_state()
         try:
-            emu.run(max_instructions=max_insns)
+            emu.run(max_instructions=args.max_insns)
         except RuntimeError as e:
             print(f"Stopped: {e}")
     else:
         try:
-            emu.run(max_instructions=max_insns)
+            emu.run(max_instructions=args.max_insns)
         except RuntimeError as e:
             print(f"Stopped: {e}")
 
@@ -3749,7 +3773,7 @@ def main() -> None:
     print(f"Scheduler entered {emu._tick_hook_count} times")
     if emu._tick_hook_count > 0:
         print("\n--- Final state ---")
-        emu.dump_tick_state()
+        emu.dump_tick_state(show_sims=True)
 
 
 if __name__ == "__main__":
