@@ -40,6 +40,12 @@ from unicorn.x86_const import (
 
 from simtower.constants import (
     CALL_TRAP_BASE,
+    CARRIER_CAR0_CURRENT_FLOOR_OFF,
+    CARRIER_CAR0_DIRECTION_OFF,
+    CARRIER_CAR0_TARGET_FLOOR_OFF,
+    CARRIER_CAR_STRIDE,
+    CARRIER_TABLE_DS_OFF,
+    CARRIER_TABLE_MAX,
     DS_OFF,
     FACILITY_WIDTHS,
     FAMILY_NAMES,
@@ -49,6 +55,8 @@ from simtower.constants import (
     LOAD_BASE,
     MEM_SIZE,
     OBJ_STRIDE,
+    PLACE_CARRIER_NE_SEG,
+    PLACE_CARRIER_OFFSET,
     PLACE_OBJ_NE_SEG,
     PLACE_OBJ_OFFSET,
     PLACE_STAIRS_NE_SEG,
@@ -921,7 +929,7 @@ class SimTowerEmulator:
             "daypart": self._ds_u8(d["daypart_index"]),
             "stars": self._ds_u16(d["star_count"]),
             "cash": self._ds_i32(d["cash_balance"]) * 100,
-            "calendar_phase": self._ds_u8(d["calendar_phase"]),
+            "weekend": self._ds_u8(d["weekend"]) if "weekend" in d else 0,
             "metro_floor": self._ds_i16(d["metro_floor"]),
             "population": self._ds_i32(d["primary_family_ledger_total"]),
             "rng_calls": self._rng_call_count,
@@ -932,6 +940,8 @@ class SimTowerEmulator:
                 "route": bool(self._ds_u8(d["route_viable"])),
             },
         }
+
+        state["carriers"] = self._collect_carriers()
 
         if not show_sims:
             return state
@@ -997,7 +1007,7 @@ class SimTowerEmulator:
         d = state
         print(
             f"TICK day={d['day']} tick={d['tick']} daypart={d['daypart']} "
-            f"stars={d['stars']} cash=${d['cash']:,} cal_phase={d['calendar_phase']} "
+            f"stars={d['stars']} cash=${d['cash']:,} weekend={d['weekend']} "
             f"metro={d['metro_floor']} pop={d['population']}"
         )
 
@@ -1342,6 +1352,179 @@ class SimTowerEmulator:
             )
         return ok
 
+    def build_carrier(
+        self,
+        bottom_floor_logical: int,
+        top_floor_logical: int,
+        left_tile: int,
+        *,
+        tool_code: int = 0x01,
+    ) -> bool:
+        """Place an elevator shaft spanning [bottom_floor, top_floor].
+
+        place_carrier_shaft (1200:1034) creates a single-floor shaft per call
+        and rejects overlapping placements at the same column. We call it once
+        at `bottom_floor` (to get valid initialization, route registration, and
+        cost accounting), then patch top_served_floor / bottom_served_floor /
+        served_floor_flags directly to widen the served range.
+
+        Args:
+            bottom_floor_logical: Lowest served floor (inclusive). 0 is lobby.
+            top_floor_logical: Highest served floor (inclusive).
+            left_tile: Left tile column.
+            tool_code: UI tool code passed as the `floor_class` parameter to
+                place_carrier_shaft. Maps to carrier_mode + capacity inside
+                the call site of dispatch_construction_tool:
+                  0x01 → mode 1 (standard), capacity 0x15, width 4
+                  0x2A → mode 0 (express),  capacity 0x2A, width 6
+                  0x2B → mode 2 (service),  capacity 0x15, width 4
+        """
+        tool_to_mode_cap = {
+            0x01: (1, 0x15),
+            0x2A: (0, 0x2A),
+            0x2B: (2, 0x15),
+        }
+        if tool_code not in tool_to_mode_cap:
+            log.warning("Unknown elevator tool_code 0x%02x", tool_code)
+            return False
+        mode, capacity = tool_to_mode_cap[tool_code]
+
+        if bottom_floor_logical > top_floor_logical:
+            bottom_floor_logical, top_floor_logical = (
+                top_floor_logical,
+                bottom_floor_logical,
+            )
+
+        # place_carrier_shaft creates a single-floor shaft per call. Multi-floor
+        # shafts in SimTower are built by placing at bottom, then patching the
+        # served_floor_flags + top/bottom_served_floor directly to extend upward.
+        # Each extra served floor requires ensure_floor_blob for support.
+        bot_idx = bottom_floor_logical + 10
+        top_idx = top_floor_logical + 10
+        self.ensure_floor_blob(bot_idx)
+        for fl in range(bottom_floor_logical + 1, top_floor_logical + 1):
+            self.ensure_floor_blob(fl + 10)
+
+        params = [tool_code, bot_idx, left_tile, mode, capacity]
+        result = self.call_far(PLACE_CARRIER_NE_SEG, PLACE_CARRIER_OFFSET, params)
+        if result == 0:
+            log.warning(
+                "place_carrier_shaft failed: floor %d col %d tool=0x%02x",
+                bottom_floor_logical,
+                left_tile,
+                tool_code,
+            )
+            return False
+
+        # Find the shaft slot we just created and patch its served range.
+        for slot in range(CARRIER_TABLE_MAX):
+            base = self._read_carrier_header_base(slot)
+            if base is None:
+                continue
+            hdr0 = self.mu.mem_read(base, 1)[0]
+            if hdr0 == 0:
+                continue
+            height = struct.unpack("<H", bytes(self.mu.mem_read(base + 0x3E, 2)))[0]
+            cmode = self.mu.mem_read(base + 0x01, 1)[0]
+            if height == left_tile and cmode == mode:
+                # Widen served range.
+                self.mu.mem_write(base + 0x40, struct.pack("b", top_idx))
+                self.mu.mem_write(base + 0x41, struct.pack("b", bot_idx))
+                for fi in range(bot_idx, top_idx + 1):
+                    self.mu.mem_write(base + 0x42 + fi, b"\x01")
+                log.info(
+                    "Built carrier shaft slot %d col %d floors [%d..%d] mode=%d",
+                    slot,
+                    left_tile,
+                    bottom_floor_logical,
+                    top_floor_logical,
+                    mode,
+                )
+                return True
+        log.warning("Could not locate placed carrier slot to patch served range")
+        return True
+
+    def _read_carrier_header_base(self, carrier_idx: int) -> int | None:
+        """Dereference the far pointer at carrier_record_table[carrier_idx]."""
+        slot = CARRIER_TABLE_DS_OFF + carrier_idx * 4
+        off16 = self._ds_u16(slot)
+        seg16 = self._ds_u16(slot + 2)
+        if seg16 == 0:
+            return None
+        seg_base = self.selector_bases.get(seg16)
+        if seg_base is None:
+            return None
+        return seg_base + off16
+
+    def _collect_carriers(self) -> list[dict]:
+        """Collect active carrier + per-car state for the tick dump."""
+        carriers: list[dict] = []
+        for i in range(CARRIER_TABLE_MAX):
+            base = self._read_carrier_header_base(i)
+            if base is None:
+                continue
+            header = bytes(self.mu.mem_read(base, 0x42))
+            is_active = header[0x00]
+            if not is_active:
+                continue
+            mode = header[0x01]
+            capacity = header[0x02]
+            unit_count = header[0x03]
+            height_metric = struct.unpack_from("<H", header, 0x3E)[0]
+            top_floor = struct.unpack_from("b", header, 0x40)[0]
+            bottom_floor = struct.unpack_from("b", header, 0x41)[0]
+            cars: list[dict] = []
+            for c in range(unit_count):
+                base_off = (
+                    base + CARRIER_CAR0_CURRENT_FLOOR_OFF + c * CARRIER_CAR_STRIDE
+                )
+                direction_off = (
+                    base + CARRIER_CAR0_DIRECTION_OFF + c * CARRIER_CAR_STRIDE
+                )
+                target_off = (
+                    base + CARRIER_CAR0_TARGET_FLOOR_OFF + c * CARRIER_CAR_STRIDE
+                )
+                # Layout relative to base_off (-0x5e = cur_floor):
+                #   +0 cur (-0x5e, signed)       +1 stabilize (-0x5d, u8)
+                #   +2 dwell (-0x5c, u8)         +3 assigned (-0x5b, u8)
+                #   +4 direction (-0x5a, u8)     +5 target (-0x59, signed)
+                #   +6 prevFloor (-0x58, signed) +7 arrivalSeen (-0x57, u8)
+                #   +8 arrivalTick (-0x56, u16)
+                block = bytes(self.mu.mem_read(base_off, 10))
+                cur = struct.unpack_from("b", block, 0)[0]
+                stabilize = block[1]
+                dwell = block[2]
+                assigned = block[3]
+                direction = block[4]
+                target = struct.unpack_from("b", block, 5)[0]
+                prev_floor = struct.unpack_from("b", block, 6)[0]
+                arrival_seen = block[7]
+                arrival_tick = struct.unpack_from("<H", block, 8)[0]
+                cars.append(
+                    {
+                        "currentFloor": cur,
+                        "directionFlag": direction,
+                        "targetFloor": target,
+                        "stabilizeCounter": stabilize,
+                        "dwellCounter": dwell,
+                        "assignedCount": assigned,
+                        "prevFloor": prev_floor,
+                        "arrivalSeen": arrival_seen,
+                        "arrivalTick": arrival_tick,
+                    }
+                )
+            carriers.append(
+                {
+                    "column": height_metric,
+                    "mode": mode,
+                    "capacity": capacity,
+                    "bottomFloor": bottom_floor,
+                    "topFloor": top_floor,
+                    "cars": cars,
+                }
+            )
+        return carriers
+
     def setup_floor_support(
         self,
         floor_logical: int,
@@ -1602,13 +1785,18 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
         0, type_code=0x0B, left_tile=lobby_l, right_tile=lobby_r
     )
 
-    # Group facilities by floor; separate stairs
+    # Group facilities by floor; separate stairs and elevators.
+    # Elevators span multiple floors and must be placed after all floor
+    # supports are established.
     facilities = spec.get("facilities", [])
     by_floor: dict[int, list[dict]] = {}
     stairs_list: list[dict] = []
+    elevator_list: list[dict] = []
     for fac in facilities:
         if fac["type"] == "stairs":
             stairs_list.append(fac)
+        elif fac["type"] in ("elevator", "elevatorExpress", "elevatorService"):
+            elevator_list.append(fac)
         else:
             fl = fac.get("floor", 0)
             by_floor.setdefault(fl, []).append(fac)
@@ -1692,9 +1880,29 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
                 aux=fac.get("aux", 0),
             )
 
-    # Place stairs last, bottom-up (need objects on both landing floors)
+    # Place stairs (need objects on both landing floors)
     for fac in sorted(stairs_list, key=lambda f: f.get("floor", 0)):
         emu.build_stairs(top_floor_logical=fac.get("floor", 0), left_tile=fac["left"])
+
+    # Place elevators last. Each entry is a shaft spanning [bottom..top].
+    #   { "type": "elevator"|"elevatorExpress"|"elevatorService",
+    #     "bottom": 10, "top": 14, "left": 150,
+    #     "capacity": 4 (optional) }
+    _ELEVATOR_TOOL = {
+        "elevator": 0x01,
+        "elevatorExpress": 0x2A,
+        "elevatorService": 0x2B,
+    }
+    for fac in elevator_list:
+        tool = _ELEVATOR_TOOL[fac["type"]]
+        bottom = fac.get("bottom", fac.get("floor", 0))
+        top = fac.get("top", fac.get("floor", 0))
+        emu.build_carrier(
+            bottom_floor_logical=bottom,
+            top_floor_logical=top,
+            left_tile=fac["left"],
+            tool_code=tool,
+        )
 
 
 def main() -> None:

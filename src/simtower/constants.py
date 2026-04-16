@@ -80,6 +80,21 @@ DRAG_SPAN_OFFSET = 0x27CE
 PLACE_STAIRS_NE_SEG = 65
 PLACE_STAIRS_OFFSET = 0x149C
 
+# place_carrier_shaft: Ghidra 0x12001034 = NE seg 65, offset 0x1034
+# Called once per served floor; repeats on same column/mode extend the shaft.
+PLACE_CARRIER_NE_SEG = 65
+PLACE_CARRIER_OFFSET = 0x1034
+
+# Carrier record layout (verified via place_carrier_shaft + advance_car_position_one_step):
+# - DS:0xC05A holds a table of 24 far pointers to CarrierRouteRecordHeader.
+# - Header is 914 bytes; per-car state sits at header_base + 0x298a + car*0x15A.
+CARRIER_TABLE_DS_OFF = 0xC05A
+CARRIER_TABLE_MAX = 24
+CARRIER_CAR_STRIDE = 0x15A
+CARRIER_CAR0_CURRENT_FLOOR_OFF = 0x298A  # signed byte
+CARRIER_CAR0_DIRECTION_OFF = 0x298E  # byte (1=up, 0=down)
+CARRIER_CAR0_TARGET_FLOOR_OFF = 0x298F  # signed byte
+
 # Family code → human label (most common families)
 FAMILY_NAMES: dict[int, str] = {
     3: "single",
