@@ -41,8 +41,6 @@ from unicorn.x86_const import (
 from simtower.constants import (
     CALL_TRAP_BASE,
     CARRIER_CAR0_CURRENT_FLOOR_OFF,
-    CARRIER_CAR0_DIRECTION_OFF,
-    CARRIER_CAR0_TARGET_FLOOR_OFF,
     CARRIER_CAR_STRIDE,
     CARRIER_TABLE_DS_OFF,
     CARRIER_TABLE_MAX,
@@ -955,6 +953,7 @@ class SimTowerEmulator:
         family_counts: dict[int, int] = defaultdict(int)
         family_stress: dict[int, list[int]] = defaultdict(list)
         state_hist: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+        sim_states: list[int] = []
 
         n_initialized = 0
         n_uninitialized = 0
@@ -973,6 +972,7 @@ class SimTowerEmulator:
             family_counts[fam] += 1
             if rec["stress"] > 0:
                 family_stress[fam].append(rec["stress"])
+            sim_states.append(rec["state"])
             state_hist[fam][rec["state"]] += 1
 
         sims: dict[str, dict] = {}
@@ -987,6 +987,7 @@ class SimTowerEmulator:
                 "stress_max": max(stresses) if stresses else 0,
                 "states": {s: c for s, c in states.items()},
             }
+        state["sim_states"] = sorted(sim_states)
         state["sims"] = sims
         state["sim_allocated"] = sim_count
         state["sim_initialized"] = n_initialized
@@ -1102,7 +1103,7 @@ class SimTowerEmulator:
         self.mu.hook_del(hook_id)
 
     def _install_scheduler_hook(
-        self, dump_interval: int = 100, max_ticks: int = 0
+        self, dump_interval: int = 1, max_ticks: int = 0
     ) -> None:
         """Register a code hook on the scheduler function for periodic state dumps."""
         addr = self._resolve_scheduler_linear()
@@ -1477,12 +1478,6 @@ class SimTowerEmulator:
             for c in range(unit_count):
                 base_off = (
                     base + CARRIER_CAR0_CURRENT_FLOOR_OFF + c * CARRIER_CAR_STRIDE
-                )
-                direction_off = (
-                    base + CARRIER_CAR0_DIRECTION_OFF + c * CARRIER_CAR_STRIDE
-                )
-                target_off = (
-                    base + CARRIER_CAR0_TARGET_FLOOR_OFF + c * CARRIER_CAR_STRIDE
                 )
                 # Layout relative to base_off (-0x5e = cur_floor):
                 #   +0 cur (-0x5e, signed)       +1 stabilize (-0x5d, u8)
@@ -1914,10 +1909,11 @@ def main() -> None:
     parser.add_argument(
         "--dump-interval",
         type=int,
-        default=100,
+        default=1,
         help="dump state every N scheduler ticks",
     )
-    parser.add_argument("--max-insns", type=int, default=100_000_000)
+    parser.add_argument("--max-insns", type=int, default=500_000_000)
+    parser.add_argument("--max-ticks", type=int, default=10_000)
     parser.add_argument(
         "--sims",
         action="store_true",
@@ -1954,7 +1950,7 @@ def main() -> None:
     cfg = emu._build_config or {}
     dump_interval = cfg.get("dump_interval", args.dump_interval)
     max_insns = cfg.get("max_instructions", args.max_insns)
-    max_ticks = cfg.get("max_ticks", 0)
+    max_ticks = cfg.get("max_ticks", args.max_ticks)
 
     if args.mode == "build" or args.build_json:
         # Phase 1: run binary init, stop when the scheduler is first entered.
