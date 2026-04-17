@@ -1485,6 +1485,26 @@ class SimTowerEmulator:
         log.warning("Could not locate placed carrier slot to patch served range")
         return True
 
+    def drain_pending_object_rebuilds(self) -> int:
+        """Drain the deferred object-rebuild queue by calling FUN_11f8_0016.
+
+        place_object_on_floor enqueues each new placement into a 10-slot queue
+        (DS:0xC1A2 count, DS:0xC1A3 head). Entries are normally processed over
+        ~12 ticks by service_idle_tasks, which leaves the sim table with
+        uninitialized (family-byte 0xFn) sentinel slots immediately after
+        placement. Force a synchronous drain so the tick-2533 dump reflects
+        fully-materialized sims, matching the TypeScript replica that creates
+        sims eagerly at placement time.
+
+        Returns the queue count that was drained.
+        """
+        count = self._ds_u8(0xC1A2)
+        if count == 0:
+            return 0
+        # FUN_11f8_0016 is __cdecl16far, no params; NE segment 64, offset 0x0016.
+        self.call_far(64, 0x0016, [])
+        return count
+
     def _add_shaft_cars(
         self,
         base: int,
@@ -1974,6 +1994,12 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
             tool_code=tool,
             num_cars=fac.get("cars", 1),
         )
+
+    # Flush any pending deferred object rebuilds so the first tick dump
+    # reflects fully-materialized sims (see drain_pending_object_rebuilds).
+    drained = emu.drain_pending_object_rebuilds()
+    if drained:
+        log.info("Drained %d pending object rebuilds", drained)
 
 
 def main() -> None:

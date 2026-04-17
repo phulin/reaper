@@ -105,6 +105,7 @@ FAMILY_NAMES: dict[int, str] = {
     9: "condo",
     0xA: "retail",
     0xC: "fast-food",
+    0xD: "medical",
     0xE: "security",
     0xF: "housekeeping",
     0x12: "entertainment",
@@ -133,6 +134,7 @@ FACILITY_WIDTHS: dict[int, int] = {
     0x0C: 16,  # fast-food
     0x0D: 26,  # sky lobby / medical
     0x0E: 8,   # security
+    0x0F: 15,  # housekeeping
     0x12: 24,  # cinema
     0x13: 24,  # cinema (lower)
     0x14: 8,   # recycling
