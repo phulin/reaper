@@ -987,7 +987,7 @@ class SimTowerEmulator:
                 "stress_max": max(stresses) if stresses else 0,
                 "states": {s: c for s, c in states.items()},
             }
-        state["sim_states"] = sorted(sim_states)
+        state["sim_states"] = sim_states
         state["sims"] = sims
         state["sim_allocated"] = sim_count
         state["sim_initialized"] = n_initialized
