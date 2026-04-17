@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import struct
 from typing import TYPE_CHECKING
 
 from unicorn.x86_const import (
@@ -45,8 +44,6 @@ def _handle_global_alloc(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, handle)
 
 
-
-
 def _handle_global_realloc(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GlobalReAlloc(HGLOBAL hMem, DWORD dwBytes, UINT fuFlags) -> HGLOBAL
 
@@ -69,8 +66,6 @@ def _handle_global_realloc(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, handle)
 
 
-
-
 def _handle_global_free(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GlobalFree(HGLOBAL hMem) -> HGLOBAL (0 on success)
 
@@ -81,8 +76,6 @@ def _handle_global_free(emu: SimTowerEmulator, stub: StubDef) -> None:
     result = emu.heap.free(h_mem)
     log.debug("GlobalFree(h=0x%04X) -> 0x%04X", h_mem, result)
     emu.mu.reg_write(UC_X86_REG_AX, result)
-
-
 
 
 def _handle_global_lock(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -98,8 +91,6 @@ def _handle_global_lock(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, off)
 
 
-
-
 def _handle_global_unlock(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GlobalUnlock(HGLOBAL hMem) -> BOOL
 
@@ -110,8 +101,6 @@ def _handle_global_unlock(emu: SimTowerEmulator, stub: StubDef) -> None:
     remaining = emu.heap.unlock(h_mem)
     # Returns TRUE if still locked
     emu.mu.reg_write(UC_X86_REG_AX, 1 if remaining > 0 else 0)
-
-
 
 
 def _handle_global_size(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -126,8 +115,6 @@ def _handle_global_size(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, size & 0xFFFF)
 
 
-
-
 def _handle_global_handle(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GlobalHandle(UINT wMem) -> DWORD (handle in DX:AX)"""
     w_mem = _read_stack_word(emu, 4)
@@ -136,14 +123,10 @@ def _handle_global_handle(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, handle)
 
 
-
-
 def _handle_global_flags(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GlobalFlags(HGLOBAL hMem) -> UINT"""
     h_mem = _read_stack_word(emu, 4)
     emu.mu.reg_write(UC_X86_REG_AX, emu.heap.flags(h_mem))
-
-
 
 
 def _handle_global_compact(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -153,22 +136,16 @@ def _handle_global_compact(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, 0x0000)
 
 
-
-
 def _handle_get_current_task(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GetCurrentTask() -> HTASK (must be non-zero)."""
     emu.mu.reg_write(UC_X86_REG_AX, 0x1234)  # fake task handle
     log.debug("GetCurrentTask() -> 0x1234")
 
 
-
-
 def _handle_get_module_usage(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GetModuleUsage(HMODULE hModule) -> int (reference count)."""
     emu.mu.reg_write(UC_X86_REG_AX, 1)
     log.debug("GetModuleUsage() -> 1")
-
-
 
 
 def _handle_get_module_filename(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -191,8 +168,6 @@ def _handle_get_module_filename(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("GetModuleFileName() -> %d chars", write_len - 1)
 
 
-
-
 def _handle_make_proc_instance(emu: SimTowerEmulator, stub: StubDef) -> None:
     """MakeProcInstance(FARPROC lpProc, HINSTANCE hInst) -> FARPROC
 
@@ -211,13 +186,9 @@ def _handle_make_proc_instance(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("MakeProcInstance(%04X:%04X) -> passthrough", seg, off)
 
 
-
-
 def _handle_free_proc_instance(emu: SimTowerEmulator, stub: StubDef) -> None:
     """FreeProcInstance(FARPROC lpProc) — no-op since we don't create thunks."""
     log.debug("FreeProcInstance() -> no-op")
-
-
 
 
 def _handle_find_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -295,8 +266,6 @@ def _handle_find_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     )
 
 
-
-
 def _handle_load_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     """LoadResource(HMODULE hInst, HRSRC hResInfo) -> HGLOBAL.
 
@@ -339,8 +308,6 @@ def _handle_load_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     )
 
 
-
-
 def _handle_lock_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     """LockResource(HGLOBAL hResData) -> LPVOID (far pointer DX:AX).
 
@@ -353,16 +320,12 @@ def _handle_lock_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("LockResource(0x%04X) -> %04X:%04X", h_res, sel, off)
 
 
-
-
 def _handle_free_resource(emu: SimTowerEmulator, stub: StubDef) -> None:
     """FreeResource(HGLOBAL hResData) -> BOOL (0 = success)."""
     h_res = _read_stack_word(emu, 4)
     result = emu.heap.free(h_res)
     emu.mu.reg_write(UC_X86_REG_AX, result)
     log.debug("FreeResource(0x%04X) -> %d", h_res, result)
-
-
 
 
 def _handle_lstrcpy(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -398,8 +361,6 @@ def _handle_lstrcpy(emu: SimTowerEmulator, stub: StubDef) -> None:
     )
 
 
-
-
 def _handle_lstrcat(emu: SimTowerEmulator, stub: StubDef) -> None:
     """lstrcat(LPSTR lpDst, LPCSTR lpSrc) -> LPSTR.
 
@@ -430,8 +391,6 @@ def _handle_lstrcat(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, dst_off)
 
 
-
-
 def _handle_lstrlen(emu: SimTowerEmulator, stub: StubDef) -> None:
     """lstrlen(LPCSTR lpString) -> int.
 
@@ -447,8 +406,6 @@ def _handle_lstrlen(emu: SimTowerEmulator, stub: StubDef) -> None:
     length = null_pos if null_pos >= 0 else 1024
     emu.mu.reg_write(UC_X86_REG_AX, length)
     log.debug("lstrlen() -> %d", length)
-
-
 
 
 def _handle_get_profile_string(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -483,8 +440,6 @@ def _handle_get_profile_string(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("GetProfileString() -> %d (default)", result_len)
 
 
-
-
 def _handle_init_task(emu: SimTowerEmulator, stub: StubDef) -> None:
     """InitTask() — Win16 task initialization.
 
@@ -509,8 +464,6 @@ def _handle_init_task(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("InitTask() -> AX=1 DI=%04X", dgroup_sel)
 
 
-
-
 def _handle_load_library(emu: SimTowerEmulator, stub: StubDef) -> None:
     """LoadLibrary(LPCSTR lpLibFileName) -> HINSTANCE
 
@@ -518,8 +471,6 @@ def _handle_load_library(emu: SimTowerEmulator, stub: StubDef) -> None:
     """
     emu.mu.reg_write(UC_X86_REG_AX, 0x100)  # fake module handle
     log.debug("LoadLibrary() -> 0x0100")
-
-
 
 
 def _handle_output_debug_string(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -533,8 +484,6 @@ def _handle_output_debug_string(emu: SimTowerEmulator, stub: StubDef) -> None:
     if null_pos >= 0:
         data = data[:null_pos]
     log.info("OutputDebugString: %s", data.decode("ascii", errors="replace"))
-
-
 
 
 def _handle_get_private_profile_int(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -551,8 +500,6 @@ def _handle_get_private_profile_int(emu: SimTowerEmulator, stub: StubDef) -> Non
     log.debug("GetPrivateProfileInt() -> %d (default)", n_default)
 
 
-
-
 def _handle_get_win_flags(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GetWinFlags() -> DWORD
 
@@ -565,16 +512,12 @@ def _handle_get_win_flags(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("GetWinFlags() -> 0x%04X", flags)
 
 
-
-
 def _handle_get_free_space(emu: SimTowerEmulator, stub: StubDef) -> None:
     """GetFreeSpace(UINT fuFlags) -> DWORD (bytes free)."""
     free = 4 * 1024 * 1024  # report 4 MB free
     emu.mu.reg_write(UC_X86_REG_AX, free & 0xFFFF)
     emu.mu.reg_write(UC_X86_REG_DX, (free >> 16) & 0xFFFF)
     log.debug("GetFreeSpace() -> %d", free)
-
-
 
 
 def _handle_hmemcpy(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -605,8 +548,6 @@ def _handle_hmemcpy(emu: SimTowerEmulator, stub: StubDef) -> None:
     )
 
 
-
-
 def _handle_write_profile_string(emu: SimTowerEmulator, stub: StubDef) -> None:
     """WriteProfileString(LPCSTR lpAppName, LPCSTR lpKeyName, LPCSTR lpString) -> BOOL.
 
@@ -616,13 +557,9 @@ def _handle_write_profile_string(emu: SimTowerEmulator, stub: StubDef) -> None:
     log.debug("WriteProfileString() -> 1")
 
 
-
-
 def _handle_lclose(emu: SimTowerEmulator, stub: StubDef) -> None:
     """_lclose(HFILE hFile) -> 0 on success."""
     emu.mu.reg_write(UC_X86_REG_AX, 0)
-
-
 
 
 def _handle_lread(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -631,8 +568,6 @@ def _handle_lread(emu: SimTowerEmulator, stub: StubDef) -> None:
     Return 0 (read 0 bytes — EOF).
     """
     emu.mu.reg_write(UC_X86_REG_AX, 0)
-
-
 
 
 def _handle_lcreat(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -650,8 +585,6 @@ def _handle_lcreat(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, 0xFFFF)
 
 
-
-
 def _handle_llseek(emu: SimTowerEmulator, stub: StubDef) -> None:
     """_llseek(HFILE hFile, LONG lOffset, int iOrigin) -> LONG.
 
@@ -659,8 +592,6 @@ def _handle_llseek(emu: SimTowerEmulator, stub: StubDef) -> None:
     """
     emu.mu.reg_write(UC_X86_REG_AX, 0)
     emu.mu.reg_write(UC_X86_REG_DX, 0)
-
-
 
 
 def _handle_lopen(emu: SimTowerEmulator, stub: StubDef) -> None:
@@ -679,8 +610,6 @@ def _handle_lopen(emu: SimTowerEmulator, stub: StubDef) -> None:
     emu.mu.reg_write(UC_X86_REG_AX, 0xFFFF)  # HFILE_ERROR
 
 
-
-
 def _handle_lwrite(emu: SimTowerEmulator, stub: StubDef) -> None:
     """_lwrite(HFILE hFile, LPCSTR lpBuffer, UINT uBytes) -> UINT.
 
@@ -688,8 +617,6 @@ def _handle_lwrite(emu: SimTowerEmulator, stub: StubDef) -> None:
     """
     cb = _read_stack_word(emu, 4)
     emu.mu.reg_write(UC_X86_REG_AX, cb)
-
-
 
 
 STUB_HANDLERS_KERNEL: dict[tuple[str, int], StubHandler] = {

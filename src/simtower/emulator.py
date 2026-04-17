@@ -1250,6 +1250,34 @@ class SimTowerEmulator:
         )
         return block.linear
 
+    def _setup_viewport_for_floor(self, floor_idx: int) -> None:
+        """Park the viewport-derived row constant so that placement helpers
+        don't write past their draw-buffer bounds.
+
+        Why: `place_object_on_floor` and `place_mergeable_span_object_on_floor`
+        unconditionally call FUN_1040_002f (1040:002f), which repaints a
+        rectangle in the draw buffers at DS:0x814F (stride 0x19C) and
+        DS:0x9CA8 (stride 0x67). The row index is
+        `param_2 = DAT_7f66 − floor_idx`. DAT_7f66 is a viewport scroll
+        coordinate (119 − DAT_BC66/36). In gameplay the UI only places
+        objects on visible floors, so param_2 stays in [0, DAT_7f68) and
+        writes land inside the draw buffers. Our headless bootstrap never
+        scrolls, so after wait_for_scheduler DAT_7f66 sits at 117 — making
+        param_2 for floor_idx=14 equal 103, which overflows 0x9CA8 by ~130
+        bytes and clobbers specialLinks entry 13, creating a phantom
+        escalator that bills $5000/day in the expense sweep.
+
+        Fix: before each placement, set DAT_7f66 to floor_idx + 20 so
+        param_2 = 20 — comfortably inside both buffers.
+        """
+        safe_param_2 = 20
+        ds_base = self._ds_base
+        # DAT_7f66 — viewport-derived top-row index
+        self.mu.mem_write(
+            ds_base + 0x7F66,
+            struct.pack("<H", (floor_idx + safe_param_2) & 0xFFFF),
+        )
+
     def build_object(
         self,
         type_code: int,
@@ -1284,6 +1312,7 @@ class SimTowerEmulator:
         """
         floor_idx = floor_logical + 10
         self.ensure_floor_blob(floor_idx)
+        self._setup_viewport_for_floor(floor_idx)
 
         # place_object_on_floor(type, variant, aux, floor_idx, left, right, skip_cost)
         # 7 params — the decompiler's "param_1" was a phantom CS register, not a real arg.
@@ -1332,6 +1361,7 @@ class SimTowerEmulator:
         # Ensure floor blobs exist for both floors
         self.ensure_floor_blob(top_floor_idx)
         self.ensure_floor_blob(top_floor_idx - 1)
+        self._setup_viewport_for_floor(top_floor_idx)
 
         # cost_param: pass 0 (funds are available, game has $20k internal)
         params = [0, top_floor_idx, left_tile, 1]  # mode=1 = stairs
@@ -1405,6 +1435,7 @@ class SimTowerEmulator:
         self.ensure_floor_blob(bot_idx)
         for fl in range(bottom_floor_logical + 1, top_floor_logical + 1):
             self.ensure_floor_blob(fl + 10)
+        self._setup_viewport_for_floor(bot_idx)
 
         params = [tool_code, bot_idx, left_tile, mode, capacity]
         result = self.call_far(PLACE_CARRIER_NE_SEG, PLACE_CARRIER_OFFSET, params)
