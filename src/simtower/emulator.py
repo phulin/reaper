@@ -1390,6 +1390,7 @@ class SimTowerEmulator:
         left_tile: int,
         *,
         tool_code: int = 0x01,
+        num_cars: int = 1,
     ) -> bool:
         """Place an elevator shaft spanning [bottom_floor, top_floor].
 
@@ -1409,6 +1410,9 @@ class SimTowerEmulator:
                   0x01 → mode 1 (standard), capacity 0x15, width 4
                   0x2A → mode 0 (express),  capacity 0x2A, width 6
                   0x2B → mode 2 (service),  capacity 0x15, width 4
+            num_cars: Total cars in this shaft (1..8). Extra cars are copied
+                from car 0's fully-initialized state block and placed at home
+                floors evenly spaced across the served range.
         """
         tool_to_mode_cap = {
             0x01: (1, 0x15),
@@ -1464,17 +1468,57 @@ class SimTowerEmulator:
                 self.mu.mem_write(base + 0x41, struct.pack("b", bot_idx))
                 for fi in range(bot_idx, top_idx + 1):
                     self.mu.mem_write(base + 0x42 + fi, b"\x01")
+                if num_cars > 1:
+                    self._add_shaft_cars(
+                        base, num_cars, bottom_floor_logical, top_floor_logical
+                    )
                 log.info(
-                    "Built carrier shaft slot %d col %d floors [%d..%d] mode=%d",
+                    "Built carrier shaft slot %d col %d floors [%d..%d] mode=%d cars=%d",
                     slot,
                     left_tile,
                     bottom_floor_logical,
                     top_floor_logical,
                     mode,
+                    min(max(num_cars, 1), 8),
                 )
                 return True
         log.warning("Could not locate placed carrier slot to patch served range")
         return True
+
+    def _add_shaft_cars(
+        self,
+        base: int,
+        num_cars: int,
+        bottom_floor_logical: int,
+        top_floor_logical: int,
+    ) -> None:
+        """Extend a freshly-placed shaft to carry `num_cars` cars.
+
+        place_carrier_shaft initializes car 0 in the per-car area at
+        base + 0x298A. For each extra car c in [1, num_cars), we copy car 0's
+        entire 0x15A-byte state block (so auxiliary fields — per-floor
+        waiting/dest counts, route slots, etc. — start in a known-good state)
+        and then patch currentFloor / targetFloor / prevFloor to the car's
+        home floor (evenly spaced across the served range).
+        """
+        n = min(max(num_cars, 1), 8)
+        self.mu.mem_write(base + 0x03, struct.pack("B", n))
+        car0_off = base + CARRIER_CAR0_CURRENT_FLOOR_OFF
+        car0_block = bytes(self.mu.mem_read(car0_off, CARRIER_CAR_STRIDE))
+        span = top_floor_logical - bottom_floor_logical
+        for c in range(1, n):
+            home_logical = (
+                bottom_floor_logical
+                if n == 1
+                else bottom_floor_logical + (span * c) // (n - 1)
+            )
+            home_idx = home_logical + 10
+            car_off = car0_off + c * CARRIER_CAR_STRIDE
+            self.mu.mem_write(car_off, car0_block)
+            # Offsets within the car block: +0 cur, +5 target, +6 prev.
+            self.mu.mem_write(car_off + 0, struct.pack("b", home_idx))
+            self.mu.mem_write(car_off + 5, struct.pack("b", home_idx))
+            self.mu.mem_write(car_off + 6, struct.pack("b", home_idx))
 
     def _read_carrier_header_base(self, carrier_idx: int) -> int | None:
         """Dereference the far pointer at carrier_record_table[carrier_idx]."""
@@ -1913,7 +1957,7 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
     # Place elevators last. Each entry is a shaft spanning [bottom..top].
     #   { "type": "elevator"|"elevatorExpress"|"elevatorService",
     #     "bottom": 10, "top": 14, "left": 150,
-    #     "capacity": 4 (optional) }
+    #     "cars": 2 (optional, 1..8) }
     _ELEVATOR_TOOL = {
         "elevator": 0x01,
         "elevatorExpress": 0x2A,
@@ -1928,6 +1972,7 @@ def _place_build_objects(emu: SimTowerEmulator) -> None:
             top_floor_logical=top,
             left_tile=fac["left"],
             tool_code=tool,
+            num_cars=fac.get("cars", 1),
         )
 
 
